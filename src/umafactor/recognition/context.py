@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 from .candidate_generation import FactorOCRLike, FactorPredictorLike
 from .characters import CharacterPredictorLike
+from .model_registry import get_predictor
 from .star_rank import RankPredictorLike
 from ..config import green_factor_names
-from ..infer import get_predictor
 from ..ocr import get_ocr
 
 

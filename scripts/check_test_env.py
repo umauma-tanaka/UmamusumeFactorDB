@@ -20,6 +20,13 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from umafactor.recognition.model_registry import (  # noqa: E402
+    describe_loaded_model_io,
+    validate_required_models,
+)
+
 FIXTURES_DIR = ROOT / "tests" / "fixtures"
 RECOGNITION_RESULTS = FIXTURES_DIR / "colored_factors" / "recognition_results.json"
 EXPECTED_LABELS = FIXTURES_DIR / "expected_labels.csv"
@@ -60,15 +67,6 @@ EASYOCR_MODEL_FILES = [
     EASYOCR_DIR / "craft_mlt_25k.pth",
     EASYOCR_DIR / "japanese_g2.pth",
 ]
-
-REQUIRED_MODELS = [
-    ROOT / "models" / "modules" / "factor" / "prediction.onnx",
-    ROOT / "models" / "modules" / "factor_rank" / "prediction.onnx",
-    ROOT / "models" / "modules" / "character" / "prediction.onnx",
-    ROOT / "models" / "modules" / "star_classifier" / "prediction.onnx",
-]
-STAR_CLASSIFIER_MODEL = ROOT / "models" / "modules" / "star_classifier" / "prediction.onnx"
-
 
 @dataclass
 class CheckResult:
@@ -189,7 +187,10 @@ def check_easyocr_models() -> list[CheckResult]:
 def check_models(allow_missing_star_classifier: bool = False) -> list[CheckResult]:
     results: list[CheckResult] = []
     zip_entries = _module_zip_entries()
-    for path in REQUIRED_MODELS:
+    for model_result in validate_required_models(
+        allow_missing_star_classifier=allow_missing_star_classifier,
+    ):
+        path = model_result.path
         if path.exists():
             results.append(
                 CheckResult(
@@ -207,7 +208,7 @@ def check_models(allow_missing_star_classifier: bool = False) -> list[CheckResul
             detail = f"missing; not found in {_rel(MODULES_ZIP)}"
         else:
             detail = f"missing; {_rel(MODULES_ZIP)} is also missing"
-        if path == STAR_CLASSIFIER_MODEL and allow_missing_star_classifier:
+        if not model_result.required:
             results.append(
                 CheckResult(
                     name=f"model:{_rel(path)}",
@@ -262,6 +263,7 @@ def check_fixtures() -> list[CheckResult]:
 def build_report(
     allow_missing_star_classifier: bool = False,
     skip_ocr: bool = False,
+    include_model_io: bool = False,
 ) -> dict:
     checks = []
     checks.extend(check_imports(skip_ocr=skip_ocr))
@@ -279,6 +281,18 @@ def build_report(
         checks.extend(check_easyocr_models())
     checks.extend(check_models(allow_missing_star_classifier))
     checks.extend(check_fixtures())
+    model_io = {}
+    if include_model_io:
+        try:
+            model_io = describe_loaded_model_io()
+        except Exception as exc:
+            checks.append(
+                CheckResult(
+                    name="model_io:loaded_onnx",
+                    status="FAIL",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+            )
     has_failures = any(c.required and c.status == "FAIL" for c in checks)
     has_warnings = any(c.status == "WARN" for c in checks)
     return {
@@ -287,6 +301,7 @@ def build_report(
         "root": str(ROOT),
         "allow_missing_star_classifier": allow_missing_star_classifier,
         "skip_ocr": skip_ocr,
+        "model_io": model_io,
         "ok": not has_failures,
         "has_warnings": has_warnings,
         "checks": [asdict(c) for c in checks],
@@ -305,6 +320,14 @@ def print_report(report: dict) -> None:
             "FAIL": "[FAIL]",
         }.get(check["status"], f"[{check['status']}]")
         print(f"{marker} {check['name']}: {check['detail']}")
+    if report.get("model_io"):
+        print("")
+        print("ONNX model I/O")
+        for model_name, model_io in report["model_io"].items():
+            print(
+                f"- {model_name}: input={model_io['input_name']} "
+                f"shape={model_io['input_shape']} outputs={model_io['output_names']}"
+            )
     print("")
     if report["ok"]:
         print("result: OK")
@@ -326,12 +349,21 @@ def main() -> int:
         action="store_true",
         help="Do not require EasyOCR import or local model files for this check.",
     )
+    parser.add_argument(
+        "--include-model-io",
+        action="store_true",
+        help="Load ONNX predictors and include input shape/output names in the report.",
+    )
     args = parser.parse_args()
 
     allow_missing_star_classifier = (
         args.allow_missing_star_classifier or _env_truthy(os.environ.get(STAR_FALLBACK_ENV))
     )
-    report = build_report(allow_missing_star_classifier, skip_ocr=args.skip_ocr)
+    report = build_report(
+        allow_missing_star_classifier,
+        skip_ocr=args.skip_ocr,
+        include_model_io=args.include_model_io,
+    )
     print_report(report)
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)

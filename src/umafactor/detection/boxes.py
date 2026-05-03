@@ -261,7 +261,7 @@ def _build_boxes_for_row(
                 ssy0 = max(0, scy - shalf)
                 ssy1 = min(img.shape[0], scy + shalf)
                 slot_imgs.append(img[ssy0:ssy1, ssx0:ssx1])
-            from ..infer import predict_stars_batch  # 循環 import 回避のため関数内で
+            from ..recognition.stars import predict_stars_batch
 
             classifications = predict_stars_batch(slot_imgs)
             # CNN で gold 判定された候補の (x_center, bbox) を保持
