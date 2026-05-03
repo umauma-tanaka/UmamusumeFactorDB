@@ -19,15 +19,19 @@ from .cropper import (
 )
 from .infer import get_predictor
 from .ocr import get_ocr
+from .recognition.candidate_generation import (
+    filter_slot_candidates,
+    match_template_candidates,
+    predict_onnx_candidates,
+    recognize_ocr_candidates,
+)
 from .recognition.candidate_fusion import (
     merge_candidates as _merge_candidates,
     merge_candidates_v2 as _merge_candidates_v2,
 )
 from .recognition.constants import (
     BLUE_FACTOR_TYPES,
-    PERTURBATIONS_BLUE,
     PERTURBATIONS_RANK,
-    PERTURBATIONS_RED,
     RED_FACTOR_TYPES,
     UMA_ROLES,
 )
@@ -44,7 +48,7 @@ from .recognition.slots import (
 )
 from .review import ReviewItem, ReviewQueue
 from .schema import FactorEntry, Submission, UmaFactors
-from .templates import match_green_name, match_green_star, match_star, match_templates
+from .templates import match_green_name, match_green_star, match_star
 
 
 def analyze_image(
@@ -212,87 +216,40 @@ def analyze_image(
         ext_bbox = box.bbox
         ext_text_crop_norm = text_crop_norm
 
-        # ONNX 候補
-        if is_blue_slot:
-            crops = [
-                _crop_from_original(img_orig, ext_bbox, scale, dy, dx)
-                for dy, dx in PERTURBATIONS_BLUE
-            ]
-            crops.append(ext_text_crop_norm)
-            onnx_candidates = factor_pred.topk_in_category(crops, BLUE_FACTOR_TYPES, k=5)
-        elif is_red_slot:
-            crops = [
-                _crop_from_original(img_orig, ext_bbox, scale, dy, dx)
-                for dy, dx in PERTURBATIONS_RED
-            ]
-            crops.append(ext_text_crop_norm)
-            onnx_candidates = factor_pred.topk_in_category(
-                crops, RED_FACTOR_TYPES, k=5, use_multi_interp=True
-            )
-        else:
-            text_crop_orig = _crop_from_original(img_orig, box.bbox, scale)
-            onnx_candidates = factor_pred.topk_ensemble(
-                [text_crop_orig, text_crop_norm], k=5
-            )
-
-        # OCR 候補（display_crop を使う。テキスト全域が入っているため）
-        # 赤/青スロットは allowlist 付き OCR でゴミ文字を抑制
-        # （'2', ']' 等の雑音を除外し、候補を BLUE/RED_FACTOR_TYPES の構成文字に限定）
-        # 緑は断片分割 OCR で「連結+断片」並列マッチして長文アンカー寄せを抑制。
-        # row 0 位置絶対化で「色=緑だが青/赤スロット」のケースが出るため、
-        # 分岐は is_*_slot を最優先し、緑判定はその後で評価する。
-        ocr_raw = ""
-        ocr_fragments: list[str] = []
-        if ocr is None:
-            ocr_candidates = []
-        else:
-            if is_red_slot:
-                ocr_raw = ocr.recognize_red(display_crop)
-            elif is_blue_slot:
-                ocr_raw = ocr.recognize_blue(display_crop)
-            elif green_adoptable:
-                ocr_raw, ocr_fragments = ocr.recognize_with_parts(display_crop)
-            else:
-                ocr_raw = ocr.recognize(display_crop)
-            if green_adoptable:
-                # 緑は固有スキル辞書 249 件 + 断片並列マッチで誤マッチを抑制。
-                # 緑として採用される見込みがある box に限定することで、skills に
-                # 緑辞書マッチ名が混入する副作用を防ぐ。
-                ocr_candidates = ocr.match_to_green_factor_multi(
-                    ocr_raw, ocr_fragments, top_k=5
-                )
-            else:
-                ocr_candidates = ocr.match_to_factor(ocr_raw, top_k=5)
-        # 青/赤はカテゴリ外の候補を除外（位置ベース判定も含む）
-        if is_blue_slot:
-            ocr_candidates = [(n, s) for n, s in ocr_candidates if n in BLUE_FACTOR_TYPES]
-        elif is_red_slot:
-            ocr_candidates = [(n, s) for n, s in ocr_candidates if n in RED_FACTOR_TYPES]
-        elif not green_adoptable:
-            # 白スキル/青赤誤流入などの非緑スロットでは、ONNX の top-k に緑因子
-            # （固有スキル 249 件）が混ざると skills に '恵福バルカローレ' のような
-            # 緑専用名が紛れ込む。緑辞書は緑スロットにのみ適用するため ONNX 側も
-            # 除外する。match_to_factor 側は辞書ロード時点で緑除外済み。
-            onnx_candidates = [(n, s) for n, s in onnx_candidates if n not in green_name_set]
-
-        # テンプレートマッチ候補。
-        # datasets/{red_blue_templates, green_name_templates}/ の正解 crop と
-        # display_crop を比較し、ピアソン相関最大のカテゴリを採用する。
-        # 低解像度で OCR/ONNX が失敗する画像でも「既知の正解形」に最も似ている
-        # カテゴリを選べる強力なシグナル。
-        template_candidates: list[tuple[str, float]] = []
-        if is_red_slot:
-            template_candidates = match_templates(display_crop, "red")[:5]
-        elif is_blue_slot:
-            template_candidates = match_templates(display_crop, "blue")[:5]
-        elif green_adoptable:
-            # 緑因子タイルの名前領域（左 85%）をテンプレと比較
-            _nx0, _ny0, _nx1, _ny1 = box.bbox
-            _name_x1 = _nx0 + int((_nx1 - _nx0) * 0.85)
-            _name_crop = _display_crop_from_original(
-                img_orig, (_nx0, _ny0, _name_x1, _ny1), scale, pad_y_norm=2
-            )
-            template_candidates = match_green_name(_name_crop)[:5]
+        onnx_candidates = predict_onnx_candidates(
+            factor_pred,
+            img_orig,
+            ext_text_crop_norm,
+            box.bbox,
+            ext_bbox,
+            scale,
+            is_blue_slot=is_blue_slot,
+            is_red_slot=is_red_slot,
+        )
+        ocr_raw, ocr_candidates = recognize_ocr_candidates(
+            ocr,
+            display_crop,
+            is_blue_slot=is_blue_slot,
+            is_red_slot=is_red_slot,
+            green_adoptable=green_adoptable,
+        )
+        onnx_candidates, ocr_candidates = filter_slot_candidates(
+            onnx_candidates,
+            ocr_candidates,
+            is_blue_slot=is_blue_slot,
+            is_red_slot=is_red_slot,
+            green_adoptable=green_adoptable,
+            green_name_set=green_name_set,
+        )
+        template_candidates = match_template_candidates(
+            display_crop,
+            img_orig,
+            box.bbox,
+            scale,
+            is_red_slot=is_red_slot,
+            is_blue_slot=is_blue_slot,
+            green_adoptable=green_adoptable,
+        )
 
         # マージ（緑スロットは OCR top1 が正解を出すケースでも全 813 辞書の ONNX top1 に
         # 押し負けやすいため、ocr_strong_threshold を 0.5 に緩和して OCR を優先する）
