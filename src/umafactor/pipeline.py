@@ -31,7 +31,6 @@ from .recognition.candidate_fusion import (
 )
 from .recognition.constants import (
     BLUE_FACTOR_TYPES,
-    PERTURBATIONS_RANK,
     RED_FACTOR_TYPES,
     UMA_ROLES,
 )
@@ -46,9 +45,15 @@ from .recognition.slots import (
     is_green_candidate_box,
     should_adopt_green_box,
 )
+from .recognition.star_rank import (
+    apply_missing_green_star_fallbacks,
+    predict_factor_star,
+    resolve_colored_star,
+    resolve_green_star,
+)
 from .review import ReviewItem, ReviewQueue
 from .schema import FactorEntry, Submission, UmaFactors
-from .templates import match_green_name, match_green_star, match_star
+from .templates import match_green_name
 
 
 def analyze_image(
@@ -158,7 +163,6 @@ def analyze_image(
             best_green_gold[uidx] = g
 
     for box in boxes:
-        rank_crop_orig = _crop_rank_from_original(img_orig, box.bbox, scale, box.rank_bbox)
         x0, y0, x1, y1 = box.bbox
         text_crop_norm = norm_img[y0:y1, x0:x1]
 
@@ -273,63 +277,22 @@ def analyze_image(
                 sources[t_name] = "template"
         top_name = merged[0][0] if merged else ""
 
-        # ★数は金★の実数カウントを最優先（rank モデルより高精度な実測値）。
-        # ただし金★検出の HSV 閾値次第で暗めの金★を取りこぼすケースがあり、
-        # gold_star_count==0 だと実際は★1以上あるのに★0と誤認する可能性がある。
-        # そのため gold_star_count が 0 の場合は rank モデル推論にフォールバックする。
-        if box.gold_star_count is not None and box.gold_star_count > 0:
-            star = box.gold_star_count
-        else:
-            rpred = rank_pred.predict_with_perturbation(rank_crop_orig, PERTURBATIONS_RANK)
-            try:
-                star = int(rpred.label)
-            except ValueError:
-                star = 0
-            # row 0 の青/赤スロット（col 0/1 とも因子が必ず存在する UI 構造）で
-            # rank モデルが低信頼度で★0 を返す場合は、HSV 検出漏れとみなし
-            # 最低★1 を保証する。★2+ を★1 として過少記録するリスクはあるが、
-            # ★0 誤認（因子未記録）よりは許容できる。
-            if (
-                star == 0
-                and box.row_index == 0
-                and box.col_index in (0, 1)
-                and rpred.confidence < 0.6
-            ):
-                star = 1
+        star = predict_factor_star(rank_pred, img_orig, box, scale)
 
         uma = umas[box.uma_index]
         slot_kind: str
         white_idx = 0
         # 緑採用は OCR 分岐前に判定した green_adoptable と同一。
         # （uma.green_name 空の条件は green_adoptable 内に含む）
-        uidx = box.uma_index
         green_ok = green_adoptable
         if is_blue_slot and top_name in BLUE_FACTOR_TYPES and not uma.blue_type:
             uma.blue_type = top_name
             # ★数はテンプレマッチで高確信の場合に上書き
-            _bx0, _by0, _bx1, _by1 = box.bbox
-            _b_right_x0 = _bx0 + int((_bx1 - _bx0) * 0.5)
-            _b_star_crop = _display_crop_from_original(
-                img_orig, (_b_right_x0, _by0, _bx1, _by1), scale, pad_y_norm=2
-            )
-            _b_star_matches = match_star(_b_star_crop, "blue")
-            if _b_star_matches and _b_star_matches[0][1] >= 0.92:
-                uma.blue_star = _b_star_matches[0][0]
-            else:
-                uma.blue_star = star
+            uma.blue_star = resolve_colored_star(img_orig, box.bbox, scale, "blue", star)
             slot_kind = "blue"
         elif is_red_slot and top_name in RED_FACTOR_TYPES and not uma.red_type:
             uma.red_type = top_name
-            _rx0, _ry0, _rx1, _ry1 = box.bbox
-            _r_right_x0 = _rx0 + int((_rx1 - _rx0) * 0.5)
-            _r_star_crop = _display_crop_from_original(
-                img_orig, (_r_right_x0, _ry0, _rx1, _ry1), scale, pad_y_norm=2
-            )
-            _r_star_matches = match_star(_r_star_crop, "red")
-            if _r_star_matches and _r_star_matches[0][1] >= 0.92:
-                uma.red_star = _r_star_matches[0][0]
-            else:
-                uma.red_star = star
+            uma.red_star = resolve_colored_star(img_orig, box.bbox, scale, "red", star)
             slot_kind = "red"
         elif green_ok:
             uma.green_name = top_name
@@ -342,39 +305,7 @@ def analyze_image(
             #  4. 既に計算済みの rank モデル推論結果 star（HSV 失敗 fallback）
             #  5. 緑因子は固有スキル＝必ず★>=1 なので最低★1 を保証
             # テンプレは green_tile 右半分（★領域）を 64×16 にリサイズしたもの。
-            _gx0, _gy0, _gx1, _gy1 = box.bbox
-            _g_right_x0 = _gx0 + int((_gx1 - _gx0) * 0.5)
-            _g_star_crop = _display_crop_from_original(
-                img_orig, (_g_right_x0, _gy0, _gx1, _gy1), scale, pad_y_norm=2
-            )
-            _star_matches = match_green_star(_g_star_crop)
-            if _star_matches and _star_matches[0][1] >= 0.92:
-                uma.green_star = _star_matches[0][0]
-            else:
-                own_gold = box.gold_star_count or 0
-                if own_gold > 0:
-                    uma.green_star = own_gold
-                else:
-                    nearest_star = 0
-                    best_dist = None
-                    for b in boxes:
-                        if b.uma_index != uidx or b.color != "green":
-                            continue
-                        g = b.gold_star_count or 0
-                        if g <= 0:
-                            continue
-                        d = abs(b.row_index - box.row_index)
-                        if best_dist is None or d < best_dist:
-                            best_dist = d
-                            nearest_star = g
-                    if nearest_star > 0:
-                        uma.green_star = nearest_star
-                    elif star > 0:
-                        # rank モデル推論の結果（HSV 検出が弱い画像の fallback）
-                        uma.green_star = star
-                    else:
-                        # 緑因子は固有スキル、必ず★1 以上存在する。最低保証。
-                        uma.green_star = 1
+            uma.green_star = resolve_green_star(img_orig, box, boxes, scale, star)
             slot_kind = "green"
         else:
             uma.skills.append(FactorEntry(color=box.color, name=top_name, star=star))
@@ -401,11 +332,7 @@ def analyze_image(
     # 残っているケースがある（受領 1558 parent1/parent2 等）。name は空のまま
     # ★だけ any_green_gold から補填する。評価時に name 誤認件数は変わらないが、
     # ★は正解にできる＝★悪化を防げる。
-    for uma_idx, uma in enumerate(umas):
-        if not uma.green_name and uma.green_star == 0:
-            g = any_green_gold.get(uma_idx, 0)
-            if g > 0:
-                uma.green_star = g
+    apply_missing_green_star_fallbacks(umas, any_green_gold)
 
     # 緑因子（固有スキル）から character を逆引き：
     # character は ONNX の画像分類だと衣装差などで誤判定しやすいが、
