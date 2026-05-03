@@ -38,6 +38,7 @@ from .recognition.green_prepass import compute_green_prepass
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
     crop_rank_from_original as _crop_rank_from_original,
+    display_crop_for_slot as _display_crop_for_slot,
     display_crop_from_original as _display_crop_from_original,
     extract_character_icon_bgr as _extract_character_icon_bgr,
 )
@@ -156,18 +157,14 @@ def analyze_image(
         # 真因は bbox が★中心基準で上にズレてテキストが下端にはみ出すこと。
         # display_crop の元 bbox を y1 のみ +14 に拡張（y0 は維持）で、上の行を
         # 含まずテキストだけを入れる非対称 pad に変更する。
-        if is_blue_slot:
-            display_crop = _display_crop_from_original(
-                img_orig, box.bbox, scale, pad_y_norm=8
-            )
-        elif is_red_slot:
-            img_h = norm_img.shape[0]
-            red_disp_bbox = (x0, y0, x1, min(img_h, y1 + 14))
-            display_crop = _display_crop_from_original(
-                img_orig, red_disp_bbox, scale, pad_y_norm=2
-            )
-        else:
-            display_crop = _display_crop_from_original(img_orig, box.bbox, scale)
+        display_crop = _display_crop_for_slot(
+            img_orig,
+            norm_img.shape,
+            box.bbox,
+            scale,
+            is_blue_slot=is_blue_slot,
+            is_red_slot=is_red_slot,
+        )
         ext_bbox = box.bbox
         ext_text_crop_norm = text_crop_norm
 

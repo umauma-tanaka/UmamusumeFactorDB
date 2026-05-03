@@ -67,6 +67,27 @@ def display_crop_from_original(
     return img_orig[oy0:oy1, ox0:ox1]
 
 
+def display_crop_for_slot(
+    img_orig: np.ndarray,
+    norm_img_shape: tuple[int, ...],
+    bbox: tuple[int, int, int, int],
+    scale: float,
+    *,
+    is_blue_slot: bool,
+    is_red_slot: bool,
+) -> np.ndarray:
+    if is_blue_slot:
+        return display_crop_from_original(img_orig, bbox, scale, pad_y_norm=8)
+
+    if is_red_slot:
+        x0, y0, x1, y1 = bbox
+        img_h = norm_img_shape[0]
+        red_disp_bbox = (x0, y0, x1, min(img_h, y1 + 14))
+        return display_crop_from_original(img_orig, red_disp_bbox, scale, pad_y_norm=2)
+
+    return display_crop_from_original(img_orig, bbox, scale)
+
+
 def crop_rank_from_original(
     img_orig: np.ndarray,
     bbox: tuple[int, int, int, int],
@@ -99,4 +120,3 @@ def crop_rank_from_original(
     rx1 = min(img_orig.shape[1], rx1)
     ry1 = min(img_orig.shape[0], ry1)
     return img_orig[ry0:ry1, rx0:rx1]
-

@@ -20,6 +20,7 @@ def _image(height: int = 80, width: int = 100) -> np.ndarray:
 def test_pipeline_keeps_crop_helper_aliases() -> None:
     assert pipeline._crop_from_original is image_crops.crop_from_original
     assert pipeline._display_crop_from_original is image_crops.display_crop_from_original
+    assert pipeline._display_crop_for_slot is image_crops.display_crop_for_slot
     assert pipeline._crop_rank_from_original is image_crops.crop_rank_from_original
     assert pipeline._extract_character_icon_bgr is image_crops.extract_character_icon_bgr
 
@@ -59,6 +60,51 @@ def test_display_crop_from_original_adds_fixed_horizontal_padding() -> None:
 
     assert crop.shape == (14, 50, 3)
     np.testing.assert_array_equal(crop, img[8:22, 8:58])
+
+
+def test_display_crop_for_slot_uses_blue_vertical_padding() -> None:
+    img = _image()
+
+    crop = image_crops.display_crop_for_slot(
+        img,
+        norm_img_shape=img.shape,
+        bbox=(40, 20, 50, 30),
+        scale=1.0,
+        is_blue_slot=True,
+        is_red_slot=False,
+    )
+
+    np.testing.assert_array_equal(crop, img[12:38, 8:58])
+
+
+def test_display_crop_for_slot_extends_red_bottom_only() -> None:
+    img = _image()
+
+    crop = image_crops.display_crop_for_slot(
+        img,
+        norm_img_shape=(35, 100, 3),
+        bbox=(40, 20, 50, 30),
+        scale=1.0,
+        is_blue_slot=False,
+        is_red_slot=True,
+    )
+
+    np.testing.assert_array_equal(crop, img[18:37, 8:58])
+
+
+def test_display_crop_for_slot_uses_default_crop_for_other_slots() -> None:
+    img = _image()
+
+    crop = image_crops.display_crop_for_slot(
+        img,
+        norm_img_shape=img.shape,
+        bbox=(40, 20, 50, 30),
+        scale=1.0,
+        is_blue_slot=False,
+        is_red_slot=False,
+    )
+
+    np.testing.assert_array_equal(crop, img[18:32, 8:58])
 
 
 def test_crop_rank_from_original_uses_legacy_rank_region() -> None:
