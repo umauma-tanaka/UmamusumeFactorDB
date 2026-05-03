@@ -27,8 +27,7 @@ from .recognition.candidate_generation import (
     recognize_ocr_candidates,
 )
 from .recognition.candidate_fusion import (
-    merge_candidates as _merge_candidates,
-    merge_candidates_v2 as _merge_candidates_v2,
+    finalize_factor_candidates as _finalize_factor_candidates,
 )
 from .recognition.characters import (
     apply_unique_skill_character_overrides,
@@ -205,25 +204,15 @@ def analyze_image(
 
         # マージ（緑スロットは OCR top1 が正解を出すケースでも全 813 辞書の ONNX top1 に
         # 押し負けやすいため、ocr_strong_threshold を 0.5 に緩和して OCR を優先する）
-        merge_threshold = 0.5 if green_adoptable else 0.7
-        merged, sources = _merge_candidates(
+        final_candidates = _finalize_factor_candidates(
             onnx_candidates,
             ocr_candidates,
-            limit=8,
-            ocr_strong_threshold=merge_threshold,
+            template_candidates,
+            green_adoptable=green_adoptable,
         )
-
-        # 赤/青/緑スロットでテンプレマッチ top1 が強い場合、最終 top_name として採用する。
-        # merged 側に top_name が存在しない場合もあるため、候補として追加する。
-        # 閾値: 赤/青(10/5 カテゴリ)は 0.90、緑名前(46 カテゴリ)はサンプル数が
-        # 偏るため 0.95 と厳しめに。
-        if template_candidates:
-            t_name, t_score = template_candidates[0]
-            t_threshold = 0.95 if green_adoptable else 0.90
-            if t_score >= t_threshold:
-                merged = [(t_name, t_score)] + [(n, s) for n, s in merged if n != t_name]
-                sources[t_name] = "template"
-        top_name = merged[0][0] if merged else ""
+        merged = final_candidates.candidates
+        sources = final_candidates.sources
+        top_name = final_candidates.top_name
 
         star = predict_factor_star(rank_pred, img_orig, box, scale)
 

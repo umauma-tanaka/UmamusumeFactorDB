@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 CandidateList = list[tuple[str, float]]
 SourceMap = dict[str, str]
+
+
+@dataclass(frozen=True)
+class FinalCandidateResult:
+    candidates: CandidateList
+    sources: SourceMap
+    top_name: str
 
 
 def merge_candidates(
@@ -38,6 +47,33 @@ def merge_candidates(
     sources = {n: v[1] for n, v in ordered}
     merged = [(n, min(1.0, v[0])) for n, v in ordered][:limit]
     return merged, sources
+
+
+def finalize_factor_candidates(
+    onnx_cands: CandidateList,
+    ocr_cands: CandidateList,
+    template_cands: CandidateList,
+    *,
+    green_adoptable: bool,
+    limit: int = 8,
+) -> FinalCandidateResult:
+    merge_threshold = 0.5 if green_adoptable else 0.7
+    merged, sources = merge_candidates(
+        onnx_cands,
+        ocr_cands,
+        limit=limit,
+        ocr_strong_threshold=merge_threshold,
+    )
+
+    if template_cands:
+        t_name, t_score = template_cands[0]
+        t_threshold = 0.95 if green_adoptable else 0.90
+        if t_score >= t_threshold:
+            merged = [(t_name, t_score)] + [(n, s) for n, s in merged if n != t_name]
+            sources[t_name] = "template"
+
+    top_name = merged[0][0] if merged else ""
+    return FinalCandidateResult(merged, sources, top_name)
 
 
 def merge_candidates_v2(
