@@ -19,6 +19,7 @@ from .cropper import (
 )
 from .infer import get_predictor
 from .ocr import get_ocr
+from .recognition.assignment import apply_factor_result, build_review_item
 from .recognition.candidate_generation import (
     filter_slot_candidates,
     match_template_candidates,
@@ -28,11 +29,6 @@ from .recognition.candidate_generation import (
 from .recognition.candidate_fusion import (
     merge_candidates as _merge_candidates,
     merge_candidates_v2 as _merge_candidates_v2,
-)
-from .recognition.constants import (
-    BLUE_FACTOR_TYPES,
-    RED_FACTOR_TYPES,
-    UMA_ROLES,
 )
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
@@ -48,11 +44,9 @@ from .recognition.slots import (
 from .recognition.star_rank import (
     apply_missing_green_star_fallbacks,
     predict_factor_star,
-    resolve_colored_star,
-    resolve_green_star,
 )
-from .review import ReviewItem, ReviewQueue
-from .schema import FactorEntry, Submission, UmaFactors
+from .review import ReviewQueue
+from .schema import Submission, UmaFactors
 from .templates import match_green_name
 
 
@@ -279,52 +273,29 @@ def analyze_image(
 
         star = predict_factor_star(rank_pred, img_orig, box, scale)
 
-        uma = umas[box.uma_index]
-        slot_kind: str
-        white_idx = 0
-        # 緑採用は OCR 分岐前に判定した green_adoptable と同一。
-        # （uma.green_name 空の条件は green_adoptable 内に含む）
-        green_ok = green_adoptable
-        if is_blue_slot and top_name in BLUE_FACTOR_TYPES and not uma.blue_type:
-            uma.blue_type = top_name
-            # ★数はテンプレマッチで高確信の場合に上書き
-            uma.blue_star = resolve_colored_star(img_orig, box.bbox, scale, "blue", star)
-            slot_kind = "blue"
-        elif is_red_slot and top_name in RED_FACTOR_TYPES and not uma.red_type:
-            uma.red_type = top_name
-            uma.red_star = resolve_colored_star(img_orig, box.bbox, scale, "red", star)
-            slot_kind = "red"
-        elif green_ok:
-            uma.green_name = top_name
-            # 緑の★数決定の優先順位（上から採用）:
-            #  1. 緑★テンプレートマッチ（datasets/star_templates/green/）で
-            #     高確信（score >= 0.92）の結果があればそれを最優先。HSV 実測で
-            #     拾えない umamusume 系画像で唯一精度が出せる方式。
-            #  2. 自身の gold_star_count（HSV+CNN で実測）
-            #  3. 同 uma の緑色判定 box の最も近い gold（テキスト行/★行分裂救済）
-            #  4. 既に計算済みの rank モデル推論結果 star（HSV 失敗 fallback）
-            #  5. 緑因子は固有スキル＝必ず★>=1 なので最低★1 を保証
-            # テンプレは green_tile 右半分（★領域）を 64×16 にリサイズしたもの。
-            uma.green_star = resolve_green_star(img_orig, box, boxes, scale, star)
-            slot_kind = "green"
-        else:
-            uma.skills.append(FactorEntry(color=box.color, name=top_name, star=star))
-            white_idx = white_counters[box.uma_index]
-            white_counters[box.uma_index] += 1
-            slot_kind = "white"
-
+        assignment = apply_factor_result(
+            umas[box.uma_index],
+            white_counters,
+            img_orig,
+            box,
+            boxes,
+            scale,
+            top_name,
+            star,
+            is_blue_slot=is_blue_slot,
+            is_red_slot=is_red_slot,
+            green_adoptable=green_adoptable,
+        )
         review.add(
-            ReviewItem(
-                uma_index=box.uma_index,
-                uma_role=UMA_ROLES[box.uma_index],
-                slot=slot_kind,  # type: ignore[arg-type]
-                white_index=white_idx,
-                image=display_crop.copy(),
-                candidates=merged,
-                candidate_sources=sources,
-                ocr_raw=ocr_raw,
-                current_name=top_name,
-                current_star=star,
+            build_review_item(
+                box,
+                assignment,
+                display_crop,
+                merged,
+                sources,
+                ocr_raw,
+                top_name,
+                star,
             )
         )
 
