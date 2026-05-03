@@ -37,6 +37,11 @@ from .recognition.image_crops import (
     display_crop_from_original as _display_crop_from_original,
     extract_character_icon_bgr as _extract_character_icon_bgr,
 )
+from .recognition.slots import (
+    classify_factor_slot,
+    is_green_candidate_box,
+    should_adopt_green_box,
+)
 from .review import ReviewItem, ReviewQueue
 from .schema import FactorEntry, Submission, UmaFactors
 from .templates import match_green_name, match_green_star, match_star, match_templates
@@ -108,11 +113,7 @@ def analyze_image(
         # 緑候補: 色判定 green の box、または UI 仕様上の絶対位置（row=1 col=0）。
         # 位置ベース候補を加えることで、色チップ検出が white 等に失敗しても
         # 緑因子が拾える（ユーザー報告: 緑因子が白因子扱いで混入した）。
-        is_green_candidate = (
-            box.color == "green"
-            or (box.row_index == 1 and box.col_index == 0)
-        )
-        if not is_green_candidate:
+        if not is_green_candidate_box(box):
             continue
         g = box.gold_star_count or 0
         if g > any_green_gold.get(box.uma_index, 0):
@@ -167,17 +168,10 @@ def analyze_image(
         # 青と誤判定され blue slot に先取りされる」等の事故を防ぐ。
         # row>=2 col=0 で色判定 green になる box（稀だが本物緑が cropper の
         # 都合で row=2 側に検出される画像あり）は fallback で緑スロット候補に残す。
-        if box.row_index == 0 and box.col_index == 0:
-            is_blue_slot, is_red_slot, is_green_slot = True, False, False
-        elif box.row_index == 0 and box.col_index == 1:
-            is_blue_slot, is_red_slot, is_green_slot = False, True, False
-        elif box.row_index == 1 and box.col_index == 0:
-            is_blue_slot, is_red_slot, is_green_slot = False, False, True
-        else:
-            is_blue_slot = box.color == "blue"
-            is_red_slot = box.color == "red"
-            # col=1 の色判定 green（レース名スキルの緑アイコン等）は除外。
-            is_green_slot = box.color == "green" and box.col_index == 0
+        slot_flags = classify_factor_slot(box)
+        is_blue_slot = slot_flags.is_blue
+        is_red_slot = slot_flags.is_red
+        is_green_slot = slot_flags.is_green
 
         # この box が本当に緑スロットとして採用される見込みがあるか。
         # is_green_slot=True でも best_green_box に選ばれなかった box は結局
@@ -186,39 +180,14 @@ def analyze_image(
         # 緑として採用される見込みがない box は通常 OCR ルートに流し、
         # 緑辞書は緑スロットに限定する。uma.green_name の逐次状態で先着判定。
         uidx_cur = box.uma_index
-        uma_cur_green_name = umas[uidx_cur].green_name
-        best_box_cur = best_green_box.get(uidx_cur)
-        best_conf_cur = best_green_score.get(uidx_cur, 0.0)
-        if is_green_slot and not uma_cur_green_name:
-            if best_box_cur is not None and best_conf_cur >= 0.5:
-                green_adoptable = box is best_box_cur
-            else:
-                # OCR 確信度が低い場合の fallback。
-                # 位置絶対 row=1 col=0 box は緑タイル内★が HSV で拾えない
-                # 画像（umamusume_* 等）でも必ず緑因子が存在するため、
-                # 同 uma 内に他の色判定 green box がない場合に限り強制採用。
-                # 他に色判定 green box がある場合は、そちらが OCR で正解を
-                # 出している可能性が高いため従来の ★>0 条件で判定する。
-                same_uma_green_others = any(
-                    b for b in boxes
-                    if b.uma_index == uidx_cur
-                    and b.color == "green"
-                    and b.col_index == 0
-                    and not (b.row_index == 1 and b.col_index == 0)
-                )
-                pos_absolute = (
-                    box.row_index == 1
-                    and box.col_index == 0
-                    and not same_uma_green_others
-                )
-                if pos_absolute:
-                    green_adoptable = True
-                else:
-                    green_adoptable = (
-                        box.gold_star_count is None or box.gold_star_count > 0
-                    )
-        else:
-            green_adoptable = False
+        green_adoptable = should_adopt_green_box(
+            box,
+            boxes,
+            is_green_slot=is_green_slot,
+            current_green_name=umas[uidx_cur].green_name,
+            best_green_box=best_green_box.get(uidx_cur),
+            best_green_score=best_green_score.get(uidx_cur, 0.0),
+        )
 
         # 青スロットは box.bbox が★中心基準で算出されており、一部画像で因子名
         # テキストが bbox 下端からはみ出して OCR 入力に映らない問題がある。
