@@ -27,6 +27,12 @@ DEFAULT_OUTPUT_ROOT = ROOT / "outputs" / "phase0"
 STAR_FALLBACK_ENV = "UMAFACTOR_ALLOW_MISSING_STAR_CLASSIFIER"
 sys.path.insert(0, str(ROOT / "src"))
 
+from umafactor import __version__  # noqa: E402
+from umafactor.core.debug import (  # noqa: E402
+    DebugManifest,
+    StageDebug,
+    write_debug_manifest,
+)
 from umafactor.evaluation.metrics import (  # noqa: E402
     BASIC_FIELDS,
     compare_golden,
@@ -118,6 +124,130 @@ def write_summary_md(
             ]
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _relative_artifact(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _build_debug_manifest(
+    *,
+    run_id: str,
+    output_dir: Path,
+    results_path: Path,
+    expected_path: Path,
+    golden_path: Path,
+    args: argparse.Namespace,
+    metrics: dict[str, Any],
+    env_check: subprocess.CompletedProcess[str],
+    refresh_result: subprocess.CompletedProcess[str] | None,
+    pytest_result: dict[str, Any] | None,
+    golden_result: dict[str, Any] | None,
+) -> DebugManifest:
+    stages = [
+        StageDebug(
+            name="environment_check",
+            status="ok" if env_check.returncode == 0 else "failed",
+            artifacts={
+                "json": _relative_artifact(output_dir / "env_check.json"),
+                "log": _relative_artifact(output_dir / "env_check.log"),
+            },
+            metrics={"returncode": env_check.returncode},
+        )
+    ]
+    if args.refresh:
+        stages.append(
+            StageDebug(
+                name="recognition_refresh",
+                status=(
+                    "ok"
+                    if refresh_result is not None and refresh_result.returncode == 0
+                    else "failed"
+                ),
+                artifacts={
+                    "log": _relative_artifact(output_dir / "batch_recognize.log"),
+                    "results": _relative_artifact(results_path),
+                },
+                metrics={
+                    "returncode": refresh_result.returncode
+                    if refresh_result is not None
+                    else None
+                },
+            )
+        )
+    else:
+        stages.append(StageDebug(name="recognition_refresh", status="skipped"))
+
+    evaluation_ok = (
+        bool(golden_result and golden_result["matched"])
+        if golden_result is not None
+        else metrics.get("total_wrong") == 0 and metrics.get("image_error_count") == 0
+    )
+    evaluation_artifacts = {
+        "metrics": _relative_artifact(output_dir / "metrics.json"),
+        "summary": _relative_artifact(output_dir / "summary.md"),
+        "results": _relative_artifact(output_dir / "recognition_results.json"),
+    }
+    if golden_result is not None:
+        evaluation_artifacts["golden_diff"] = _relative_artifact(
+            output_dir / "golden_diff.json"
+        )
+    else:
+        evaluation_artifacts["failures"] = _relative_artifact(output_dir / "failures.json")
+    stages.append(
+        StageDebug(
+            name="evaluation",
+            status="ok" if evaluation_ok else "failed",
+            artifacts=evaluation_artifacts,
+            metrics={
+                "profile": metrics.get("evaluation_profile"),
+                "golden_matched": metrics.get("golden_matched"),
+                "golden_diff_count": metrics.get("golden_diff_count"),
+                "total_wrong": metrics.get("total_wrong"),
+                "image_error_count": metrics.get("image_error_count"),
+            },
+        )
+    )
+    if pytest_result is not None:
+        stages.append(
+            StageDebug(
+                name="pytest",
+                status="ok" if pytest_result["returncode"] == 0 else "failed",
+                artifacts={"log": _relative_artifact(output_dir / "pytest.log")},
+                metrics={"returncode": pytest_result["returncode"]},
+                message=pytest_result["command"],
+            )
+        )
+    else:
+        stages.append(StageDebug(name="pytest", status="skipped"))
+
+    input_files = [_relative_artifact(results_path)]
+    if args.compare_golden:
+        input_files.append(_relative_artifact(golden_path))
+    else:
+        input_files.append(_relative_artifact(expected_path))
+
+    return DebugManifest(
+        run_id=run_id,
+        case_id="phase0_regression",
+        input_files=input_files,
+        pipeline_version=__version__,
+        model_versions={
+            "star_classifier": str(metrics.get("star_classifier_mode", "")),
+            "ocr": str(metrics.get("ocr_mode", "")),
+        },
+        stages=stages,
+        metrics={
+            "evaluation_profile": metrics.get("evaluation_profile"),
+            "golden_matched": metrics.get("golden_matched"),
+            "golden_diff_count": metrics.get("golden_diff_count"),
+            "total_wrong": metrics.get("total_wrong"),
+            "image_error_count": metrics.get("image_error_count"),
+        },
+    )
 
 
 def run_command(command: list[str], env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -215,6 +345,7 @@ def main() -> int:
         print(f"environment check failed; see {output_dir / 'env_check.log'}")
         return env_check.returncode
 
+    refresh_result = None
     if args.refresh:
         refresh_cmd = [sys.executable, "scripts/batch_recognize.py"]
         if args.limit is not None:
@@ -223,12 +354,15 @@ def main() -> int:
             refresh_cmd.extend(["--output", str(results_path)])
         if args.skip_ocr:
             refresh_cmd.append("--skip-ocr")
-        refresh = run_command(refresh_cmd, env=base_env)
-        (output_dir / "batch_recognize.log").write_text(refresh.stdout, encoding="utf-8")
-        if refresh.returncode != 0:
-            print(refresh.stdout)
+        refresh_result = run_command(refresh_cmd, env=base_env)
+        (output_dir / "batch_recognize.log").write_text(
+            refresh_result.stdout,
+            encoding="utf-8",
+        )
+        if refresh_result.returncode != 0:
+            print(refresh_result.stdout)
             print(f"batch recognition failed; see {output_dir / 'batch_recognize.log'}")
-            return refresh.returncode
+            return refresh_result.returncode
 
     if not results_path.exists():
         print(f"recognition results are missing: {results_path}")
@@ -300,6 +434,22 @@ def main() -> int:
         }
 
     write_summary_md(output_dir / "summary.md", metrics, pytest_result, golden_result)
+    write_debug_manifest(
+        output_dir / "debug_manifest.json",
+        _build_debug_manifest(
+            run_id=run_id,
+            output_dir=output_dir,
+            results_path=results_path,
+            expected_path=expected_path,
+            golden_path=golden_path,
+            args=args,
+            metrics=metrics,
+            env_check=env_check,
+            refresh_result=refresh_result,
+            pytest_result=pytest_result,
+            golden_result=golden_result,
+        ),
+    )
 
     print(f"Phase 0 report: {output_dir}")
     if golden_result is not None:
