@@ -30,6 +30,7 @@ from .recognition.candidate_fusion import (
     merge_candidates as _merge_candidates,
     merge_candidates_v2 as _merge_candidates_v2,
 )
+from .recognition.green_prepass import compute_green_prepass
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
     crop_rank_from_original as _crop_rank_from_original,
@@ -38,7 +39,6 @@ from .recognition.image_crops import (
 )
 from .recognition.slots import (
     classify_factor_slot,
-    is_green_candidate_box,
     should_adopt_green_box,
 )
 from .recognition.star_rank import (
@@ -47,7 +47,6 @@ from .recognition.star_rank import (
 )
 from .review import ReviewQueue
 from .schema import Submission, UmaFactors
-from .templates import match_green_name
 
 
 def analyze_image(
@@ -108,53 +107,10 @@ def analyze_image(
     # 緑候補には UI 仕様上 row=1 col=0（青因子の下）の絶対位置 box も必ず含める。
     # detect_factor_color が緑→white 等に誤判定しても、位置ベースで緑候補に入れる
     # ことで「緑因子が白スキルに流入する」事故を防ぐ。
-    best_green_box: dict[int, FactorBox] = {}
-    best_green_score: dict[int, float] = {}
-    best_green_gold: dict[int, int] = {}  # 名前採用時の最大 gold（col=0 のみ）
-    any_green_gold: dict[int, int] = {}  # ★補填用の最大 gold（col 問わず）
-    for box in boxes:
-        # 緑候補: 色判定 green の box、または UI 仕様上の絶対位置（row=1 col=0）。
-        # 位置ベース候補を加えることで、色チップ検出が white 等に失敗しても
-        # 緑因子が拾える（ユーザー報告: 緑因子が白因子扱いで混入した）。
-        if not is_green_candidate_box(box):
-            continue
-        g = box.gold_star_count or 0
-        if g > any_green_gold.get(box.uma_index, 0):
-            any_green_gold[box.uma_index] = g
-        # 緑因子は UI 仕様上 col=0（左側）のみ。col=1（右側＝白/スキル列）で
-        # detect_factor_color が緑誤判定するケース（受領 1558 parent1/parent2、
-        # 1814 main/parent1 等）があり、そこを採用するとレース名行の OCR 結果を
-        # 緑 name にしてしまう事故が発生する。col=1 は名前採用候補から除外。
-        # ただし★数は col=1 でも偽陽性タイルとして★が正しく取れていることが
-        # 多いため、any_green_gold で保持して後段 Pass 2 の★補填に使う。
-        if box.col_index != 0:
-            continue
-        dc = _display_crop_from_original(img_orig, box.bbox, scale)
-        if ocr is None:
-            cands = []
-        else:
-            raw, frags = ocr.recognize_with_parts(dc)
-            cands = ocr.match_to_green_factor_multi(raw, frags, top_k=1)
-        top_conf = cands[0][1] if cands else 0.0
-        # OCR が空 / 低スコアでも、テンプレマッチで box を比較できるよう
-        # 緑名前テンプレ top1 のスコアも加味する。同 uma 内に row=1 col=0 と
-        # row=2 col=0 の両方が color=green と判定されるケース（umamusume_182056 等）
-        # で、テンプレマッチが高スコアの方を best_green_box に選べる。
-        _gnx0, _gny0, _gnx1, _gny1 = box.bbox
-        _gn_x1 = _gnx0 + int((_gnx1 - _gnx0) * 0.85)
-        _gn_crop = _display_crop_from_original(
-            img_orig, (_gnx0, _gny0, _gn_x1, _gny1), scale, pad_y_norm=2,
-        )
-        _gn_matches = match_green_name(_gn_crop)
-        _gn_conf = _gn_matches[0][1] if _gn_matches else 0.0
-        combined_conf = max(top_conf, _gn_conf)
-        uidx = box.uma_index
-        if combined_conf > best_green_score.get(uidx, 0.0):
-            best_green_score[uidx] = combined_conf
-            best_green_box[uidx] = box
-        g = box.gold_star_count or 0
-        if g > best_green_gold.get(uidx, 0):
-            best_green_gold[uidx] = g
+    green_prepass = compute_green_prepass(boxes, img_orig, scale, ocr)
+    best_green_box = green_prepass.best_green_box
+    best_green_score = green_prepass.best_green_score
+    any_green_gold = green_prepass.any_green_gold
 
     for box in boxes:
         x0, y0, x1, y1 = box.bbox
