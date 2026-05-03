@@ -21,13 +21,7 @@ from .infer import get_predictor
 from .ocr import get_ocr
 from .recognition.assignment import apply_factor_result, build_review_item
 from .recognition.candidate_generation import (
-    filter_slot_candidates,
-    match_template_candidates,
-    predict_onnx_candidates,
-    recognize_ocr_candidates,
-)
-from .recognition.candidate_fusion import (
-    finalize_factor_candidates as _finalize_factor_candidates,
+    recognize_factor_candidates,
 )
 from .recognition.characters import (
     apply_unique_skill_character_overrides,
@@ -164,55 +158,23 @@ def analyze_image(
             is_blue_slot=is_blue_slot,
             is_red_slot=is_red_slot,
         )
-        ext_bbox = box.bbox
-        ext_text_crop_norm = text_crop_norm
-
-        onnx_candidates = predict_onnx_candidates(
+        candidate_recognition = recognize_factor_candidates(
             factor_pred,
-            img_orig,
-            ext_text_crop_norm,
-            box.bbox,
-            ext_bbox,
-            scale,
-            is_blue_slot=is_blue_slot,
-            is_red_slot=is_red_slot,
-        )
-        ocr_raw, ocr_candidates = recognize_ocr_candidates(
             ocr,
+            img_orig,
+            text_crop_norm,
             display_crop,
-            is_blue_slot=is_blue_slot,
-            is_red_slot=is_red_slot,
-            green_adoptable=green_adoptable,
-        )
-        onnx_candidates, ocr_candidates = filter_slot_candidates(
-            onnx_candidates,
-            ocr_candidates,
+            box.bbox,
+            scale,
             is_blue_slot=is_blue_slot,
             is_red_slot=is_red_slot,
             green_adoptable=green_adoptable,
             green_name_set=green_name_set,
         )
-        template_candidates = match_template_candidates(
-            display_crop,
-            img_orig,
-            box.bbox,
-            scale,
-            is_red_slot=is_red_slot,
-            is_blue_slot=is_blue_slot,
-            green_adoptable=green_adoptable,
-        )
-
-        # マージ（緑スロットは OCR top1 が正解を出すケースでも全 813 辞書の ONNX top1 に
-        # 押し負けやすいため、ocr_strong_threshold を 0.5 に緩和して OCR を優先する）
-        final_candidates = _finalize_factor_candidates(
-            onnx_candidates,
-            ocr_candidates,
-            template_candidates,
-            green_adoptable=green_adoptable,
-        )
-        merged = final_candidates.candidates
-        sources = final_candidates.sources
-        top_name = final_candidates.top_name
+        merged = candidate_recognition.candidates
+        sources = candidate_recognition.sources
+        top_name = candidate_recognition.top_name
+        ocr_raw = candidate_recognition.ocr_raw
 
         star = predict_factor_star(rank_pred, img_orig, box, scale)
 

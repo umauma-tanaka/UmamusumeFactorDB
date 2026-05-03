@@ -7,6 +7,7 @@ from umafactor.recognition.candidate_generation import (
     filter_slot_candidates,
     match_template_candidates,
     predict_onnx_candidates,
+    recognize_factor_candidates,
     recognize_ocr_candidates,
 )
 from umafactor.recognition.constants import (
@@ -307,3 +308,136 @@ def test_match_template_candidates_crops_green_name_region(monkeypatch) -> None:
 
     assert candidates == [(f"green-{i}", 1.0 - i * 0.01) for i in range(5)]
     assert crop_calls == [((10, 20, 95, 40), 2.0, 2)]
+
+
+def test_recognize_factor_candidates_filters_and_finalizes(monkeypatch) -> None:
+    pred = DummyFactorPredictor()
+    ocr = DummyOCR()
+    img_orig = _image()
+    text_crop_norm = _image(4, 8)
+    display_crop = _image(5, 7)
+    calls: list[str] = []
+
+    def fake_predict_onnx_candidates(
+        factor_pred,
+        img,
+        text_crop,
+        bbox,
+        ext_bbox,
+        scale,
+        *,
+        is_blue_slot,
+        is_red_slot,
+    ):
+        calls.append("onnx")
+        assert factor_pred is pred
+        assert img is img_orig
+        assert text_crop is text_crop_norm
+        assert bbox == (4, 4, 20, 14)
+        assert ext_bbox == bbox
+        assert scale == 1.0
+        assert is_blue_slot is False
+        assert is_red_slot is False
+        return [("green-name", 0.8), ("plain", 0.95)]
+
+    def fake_recognize_ocr_candidates(
+        ocr_arg,
+        crop,
+        *,
+        is_blue_slot,
+        is_red_slot,
+        green_adoptable,
+    ):
+        calls.append("ocr")
+        assert ocr_arg is ocr
+        assert crop is display_crop
+        assert is_blue_slot is False
+        assert is_red_slot is False
+        assert green_adoptable is False
+        return "raw text", [("ocr", 0.6)]
+
+    def fake_filter_slot_candidates(
+        onnx_candidates,
+        ocr_candidates,
+        *,
+        is_blue_slot,
+        is_red_slot,
+        green_adoptable,
+        green_name_set,
+    ):
+        calls.append("filter")
+        assert onnx_candidates == [("green-name", 0.8), ("plain", 0.95)]
+        assert ocr_candidates == [("ocr", 0.6)]
+        assert is_blue_slot is False
+        assert is_red_slot is False
+        assert green_adoptable is False
+        assert green_name_set == {"green-name"}
+        return [("plain", 0.95)], [("ocr", 0.6)]
+
+    def fake_match_template_candidates(
+        crop,
+        img,
+        bbox,
+        scale,
+        *,
+        is_red_slot,
+        is_blue_slot,
+        green_adoptable,
+    ):
+        calls.append("template")
+        assert crop is display_crop
+        assert img is img_orig
+        assert bbox == (4, 4, 20, 14)
+        assert scale == 1.0
+        assert is_red_slot is False
+        assert is_blue_slot is False
+        assert green_adoptable is False
+        return [("template", 0.90)]
+
+    monkeypatch.setattr(
+        candidate_generation,
+        "predict_onnx_candidates",
+        fake_predict_onnx_candidates,
+    )
+    monkeypatch.setattr(
+        candidate_generation,
+        "recognize_ocr_candidates",
+        fake_recognize_ocr_candidates,
+    )
+    monkeypatch.setattr(
+        candidate_generation,
+        "filter_slot_candidates",
+        fake_filter_slot_candidates,
+    )
+    monkeypatch.setattr(
+        candidate_generation,
+        "match_template_candidates",
+        fake_match_template_candidates,
+    )
+
+    result = recognize_factor_candidates(
+        pred,
+        ocr,
+        img_orig,
+        text_crop_norm,
+        display_crop,
+        bbox=(4, 4, 20, 14),
+        scale=1.0,
+        is_blue_slot=False,
+        is_red_slot=False,
+        green_adoptable=False,
+        green_name_set={"green-name"},
+    )
+
+    assert calls == ["onnx", "ocr", "filter", "template"]
+    assert result.ocr_raw == "raw text"
+    assert result.onnx_candidates == [("plain", 0.95)]
+    assert result.ocr_candidates == [("ocr", 0.6)]
+    assert result.template_candidates == [("template", 0.90)]
+    assert result.candidates == [("template", 0.90), ("plain", 0.95), ("ocr", 0.75)]
+    assert result.sources == {
+        "plain": "onnx",
+        "ocr": "ocr",
+        "template": "template",
+    }
+    assert result.top_name == "template"

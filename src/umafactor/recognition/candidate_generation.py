@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 import numpy as np
 
-from .candidate_fusion import CandidateList
+from .candidate_fusion import (
+    CandidateList,
+    SourceMap,
+    finalize_factor_candidates,
+)
 from .constants import (
     BLUE_FACTOR_TYPES,
     PERTURBATIONS_BLUE,
@@ -51,6 +56,17 @@ class FactorOCRLike(Protocol):
 
     def match_to_factor(self, text: str, top_k: int = 5) -> CandidateList:
         ...
+
+
+@dataclass(frozen=True)
+class FactorCandidateRecognition:
+    candidates: CandidateList
+    sources: SourceMap
+    top_name: str
+    ocr_raw: str
+    onnx_candidates: CandidateList
+    ocr_candidates: CandidateList
+    template_candidates: CandidateList
 
 
 def predict_onnx_candidates(
@@ -156,3 +172,71 @@ def match_template_candidates(
         img_orig, (x0, y0, name_x1, y1), scale, pad_y_norm=2
     )
     return match_green_name(name_crop)[:5]
+
+
+def recognize_factor_candidates(
+    factor_pred: FactorPredictorLike,
+    ocr: FactorOCRLike | None,
+    img_orig: np.ndarray,
+    text_crop_norm: np.ndarray,
+    display_crop: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    scale: float,
+    *,
+    is_blue_slot: bool,
+    is_red_slot: bool,
+    green_adoptable: bool,
+    green_name_set: set[str],
+    ext_bbox: tuple[int, int, int, int] | None = None,
+) -> FactorCandidateRecognition:
+    ext_bbox = bbox if ext_bbox is None else ext_bbox
+    onnx_candidates = predict_onnx_candidates(
+        factor_pred,
+        img_orig,
+        text_crop_norm,
+        bbox,
+        ext_bbox,
+        scale,
+        is_blue_slot=is_blue_slot,
+        is_red_slot=is_red_slot,
+    )
+    ocr_raw, ocr_candidates = recognize_ocr_candidates(
+        ocr,
+        display_crop,
+        is_blue_slot=is_blue_slot,
+        is_red_slot=is_red_slot,
+        green_adoptable=green_adoptable,
+    )
+    onnx_candidates, ocr_candidates = filter_slot_candidates(
+        onnx_candidates,
+        ocr_candidates,
+        is_blue_slot=is_blue_slot,
+        is_red_slot=is_red_slot,
+        green_adoptable=green_adoptable,
+        green_name_set=green_name_set,
+    )
+    template_candidates = match_template_candidates(
+        display_crop,
+        img_orig,
+        bbox,
+        scale,
+        is_red_slot=is_red_slot,
+        is_blue_slot=is_blue_slot,
+        green_adoptable=green_adoptable,
+    )
+    final_candidates = finalize_factor_candidates(
+        onnx_candidates,
+        ocr_candidates,
+        template_candidates,
+        green_adoptable=green_adoptable,
+    )
+
+    return FactorCandidateRecognition(
+        candidates=final_candidates.candidates,
+        sources=final_candidates.sources,
+        top_name=final_candidates.top_name,
+        ocr_raw=ocr_raw,
+        onnx_candidates=onnx_candidates,
+        ocr_candidates=ocr_candidates,
+        template_candidates=template_candidates,
+    )
