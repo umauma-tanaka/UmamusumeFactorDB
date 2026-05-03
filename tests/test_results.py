@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from umafactor import pipeline, results
+from umafactor.app import result_builder
 from umafactor.results import apply_review_results, build_submission
 from umafactor.review import ReviewItem, ReviewQueue
 from umafactor.schema import FactorEntry, Submission, UmaFactors
@@ -55,6 +56,11 @@ def test_build_submission_preserves_uma_order_and_image_basename() -> None:
 
 def test_pipeline_exports_apply_review_results_alias() -> None:
     assert pipeline.apply_review_results is results.apply_review_results
+
+
+def test_results_facade_exports_result_builder_functions() -> None:
+    assert results.build_submission is result_builder.build_submission
+    assert results.apply_review_results is result_builder.apply_review_results
 
 
 def test_apply_review_results_updates_reviewed_slots() -> None:
