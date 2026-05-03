@@ -1,13 +1,9 @@
-"""画像 → (Submission, ReviewQueue) への統合パイプライン。
-
-ReviewQueue は低信頼度の因子をユーザにレビューしてもらうための候補リスト。
-"""
+"""Compatibility facade for image analysis pipeline helpers."""
 
 from __future__ import annotations
 
-from .config import load_unique_skill_to_character
-from .recognition.context import build_recognition_context
-from .recognition.factor_recognition import run_factor_recognition
+from .app.analyzer import UmaFactorAnalyzer
+from .app.result_builder import apply_review_results, build_submission
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
     crop_rank_from_original as _crop_rank_from_original,
@@ -15,11 +11,7 @@ from .recognition.image_crops import (
     display_crop_from_original as _display_crop_from_original,
     extract_character_icon_bgr as _extract_character_icon_bgr,
 )
-from .recognition.image_preprocessing import (
-    dump_debug_crops as _dump_debug_crops,
-    prepare_factor_image,
-)
-from .results import apply_review_results, build_submission
+from .recognition.image_preprocessing import dump_debug_crops as _dump_debug_crops
 from .review import ReviewQueue
 from .schema import Submission
 
@@ -31,24 +23,24 @@ def analyze_image(
     auto_debug: bool = True,
     skip_ocr: bool = False,
 ) -> tuple[Submission, ReviewQueue]:
-    prepared = prepare_factor_image(
+    return UmaFactorAnalyzer().analyze_image(
         image_path,
+        submitter_id,
         debug_crops_dir=debug_crops_dir,
         auto_debug=auto_debug,
+        skip_ocr=skip_ocr,
     )
 
-    context = build_recognition_context(skip_ocr=skip_ocr)
 
-    recognition = run_factor_recognition(
-        prepared,
-        context,
-        load_unique_skill_to_character(),
-    )
-    umas = recognition.umas
-
-    submission = build_submission(
-        submitter_id=submitter_id,
-        image_path=image_path,
-        umas=umas,
-    )
-    return submission, recognition.review
+__all__ = [
+    "UmaFactorAnalyzer",
+    "_crop_from_original",
+    "_crop_rank_from_original",
+    "_display_crop_for_slot",
+    "_display_crop_from_original",
+    "_dump_debug_crops",
+    "_extract_character_icon_bgr",
+    "analyze_image",
+    "apply_review_results",
+    "build_submission",
+]
