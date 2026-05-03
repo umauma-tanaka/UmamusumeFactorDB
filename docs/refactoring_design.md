@@ -34,6 +34,7 @@ Phase 0 から Phase 3 までの実装を通して、当初計画から以下の
 - Phase 3 は `recognition/model_registry.py`、`recognition/onnx_runtime.py`、`recognition/stars.py` を追加し、`infer.py` を互換 facade 化した。計画上の `recognition/factor_rank.py` と `recognition/character.py` は新設せず、既に抽出済みの `recognition/star_rank.py` と `recognition/characters.py` を正式な分割先として扱う。
 - `scripts/check_test_env.py --include-model-io` で ONNX 入力 shape と出力名を確認できるようにした。
 - Phase 4 では、`pipeline.py` に残っていた orchestration と結果構築を `app/` へ分離した。`pipeline.py` は互換 facade として残す。
+- Phase 5 では、生スクロール連続画像 fixture を後回しにする前提で、`capture/` の型、結合済み画像 skip、metadata offset による stitcher、stitch 評価 helper、stitch case manifest loader を先に実装した。
 
 ## 未確定事項
 
@@ -45,7 +46,7 @@ Phase 0 から Phase 3 までの実装を通して、当初計画から以下の
 
 ## ブロッカー
 
-- Phase 5 に進む上での主なブロッカーは、生スクロール連続画像 fixture が未整備であること。
+- Phase 5 の画像ベース offset 推定と実画像 stitcher 評価に進む上での主なブロッカーは、生スクロール連続画像 fixture が未整備であること。
 - `tests/fixtures/colored_factors/recognition_results.json` は常設しない運用にしたため、`tests/test_recognition.py` 単体実行時は `UMAFACTOR_RECOGNITION_RESULTS` を指定するか、先に Phase 0 回帰を refresh する必要がある。
 - Phase 5 の画像結合評価には、生スクロール連続画像 fixture が必要。現状の 56 枚 full fixture だけでは stitcher の定量評価は不足する。
 
@@ -123,6 +124,8 @@ src/umafactor/
   evaluation/
     dataset.py               # fixture / expected 読み込み
     metrics.py               # accuracy, runtime, stitch metrics
+    stitch_dataset.py        # stitch case manifest loader
+    stitch_metrics.py        # offset / seam / gap-overlap metrics
     runner.py                # regression / benchmark runner
     report.py                # JSON / Markdown 出力
 
@@ -574,7 +577,7 @@ outputs/evaluation/<timestamp>/
 - `src/umafactor/pipeline.py` と `src/umafactor/results.py` は互換 facade として残した。
 - `tests/test_analyzer.py` を追加し、orchestration の順序と `pipeline.analyze_image()` facade をテストした。
 
-### Phase 5: `umacapture` 寄せの画像結合を追加
+### Phase 5: `umacapture` 寄せの画像結合を追加（非画像部分は完了）
 
 目的: 画像結合を独立機能として扱えるようにする。
 
@@ -592,6 +595,20 @@ outputs/evaluation/<timestamp>/
 - 結合済み画像の場合は stitcher をスキップできる。
 - offset / seam / duplicate の定量評価が出せる。
 
+実装済み:
+
+- `capture/scraper_types.py` に `ScrollFrame`、`FrameOffset`、`StitchPlacement`、`StitchResult` を追加した。
+- `capture/scroll_estimator.py` に metadata offset を読む `MetadataOffsetEstimator` を追加した。
+- `capture/stitcher.py` に結合済み単一画像の skip 経路と、提供済み offset による deterministic stitcher を追加した。
+- `evaluation/stitch_metrics.py` に offset error、duplicate/missing band、seam discontinuity、size match の評価 helper を追加した。
+- `evaluation/stitch_dataset.py` と `tests/fixtures/stitch_cases/README.md` で stitch case manifest 形式を定義した。
+
+未実装:
+
+- 生スクロール連続画像 fixture の追加。
+- AKAZE / FLANN / RANSAC 等による画像ベース offset 推定。
+- 実 fixture に対する stitch regression runner。
+
 ## 互換性方針
 
 - `run.py`、`server/main.py`、`sheet_writer.py`、`schema.py` の外部インターフェースは維持する。
@@ -608,21 +625,22 @@ outputs/evaluation/<timestamp>/
 
 ## 次に推奨する変更
 
-次に行うべき変更は、Phase 5 の準備として画像結合 fixture と評価基準を整備すること。
+次に行うべき変更は、生スクロール連続画像 fixture を追加し、画像ベース offset 推定の実装に入ること。
 
 理由:
 
 - Phase 0 から Phase 4 で、認識回帰、検出、推論、アプリ orchestration の分離は完了した。
-- Phase 5 は `umacapture` 寄せの画像結合が主題だが、現行 fixture は結合済み full 画像中心で stitcher 評価に不足している。
-- 実装前に scroll frame、期待 offset、期待 stitched image、失敗時 debug 出力を定義すると、画像結合アルゴリズムを安全に比較できる。
+- 型、manifest、skip 経路、提供済み offset stitcher、評価 helper は追加済み。
+- 現行 fixture は結合済み full 画像中心で、AKAZE / RANSAC 等の offset 推定を定量評価できない。
+- 生スクロール fixture が揃えば、実アルゴリズムの before / after 評価を同じ `stitch_metrics.py` で比較できる。
 
 次の PR 候補:
 
-1. `tests/fixtures/stitch_cases/` の形式を決める。
-2. 生スクロール連続画像 fixture を追加する。
-3. `evaluation` 側に offset / stitched size / seam / duplicate の比較 helper を追加する。
-4. `capture/scraper_types.py` に scroll frame と stitch metadata の型を追加する。
-5. fixture が揃った後、`capture/scroll_estimator.py` と `capture/stitcher.py` を実装する。
+1. `tests/fixtures/stitch_cases/<case_id>/frames/` に生スクロール連続画像を追加する。
+2. `case.json` に期待 offset / stitched size / expected stitched image を記録する。
+3. `capture/scroll_estimator.py` に画像ベース offset estimator を追加する。
+4. `capture/stitcher.py` に重複帯の扱い、欠落検出、seam debug 出力を追加する。
+5. `evaluation` 側に stitch regression runner を追加する。
 
 ## 参照
 
