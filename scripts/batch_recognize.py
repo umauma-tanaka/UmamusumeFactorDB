@@ -16,6 +16,7 @@ EasyOCR の初回ロード後は同一プロセス内でモデルを使い回す
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -56,8 +57,26 @@ def _collect_images() -> list[Path]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, help="Process only the first N fixture images.")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT_PATH,
+        help="Recognition JSON output path.",
+    )
+    parser.add_argument(
+        "--skip-ocr",
+        action="store_true",
+        help="Skip EasyOCR calls and evaluate only ONNX/template/star paths.",
+    )
+    args = parser.parse_args()
+
     images = _collect_images()
-    print(f"対象画像 {len(images)} 枚を解析します（CWD={ROOT}）")
+    if args.limit is not None:
+        images = images[: max(0, args.limit)]
+    ocr_mode = "skip" if args.skip_ocr else "enabled"
+    print(f"対象画像 {len(images)} 枚を解析します（CWD={ROOT}, OCR={ocr_mode}）")
     if not images:
         print("fixtures 配下に対象画像がありません", file=sys.stderr)
         return 1
@@ -70,6 +89,7 @@ def main() -> int:
             submission, _review = analyze_image(
                 image_path=str(img_path),  # 相対パスを渡す
                 submitter_id="batch_recognize",
+                skip_ocr=args.skip_ocr,
             )
             results[img_path.name] = submission.to_json_dict()
             elapsed = time.time() - tt0
@@ -78,13 +98,16 @@ def main() -> int:
             results[img_path.name] = {"error": str(e)}
             print(f"  [{i}/{len(images)}] {img_path.name}  FAILED: {e}", file=sys.stderr)
 
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_PATH.write_text(
+    output_path = args.output
+    if not output_path.is_absolute():
+        output_path = ROOT / output_path
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
         json.dumps(results, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(f"\n合計 {time.time() - t0:.1f}s")
-    print(f"出力: {OUTPUT_PATH}")
+    print(f"出力: {output_path}")
     return 0
 
 

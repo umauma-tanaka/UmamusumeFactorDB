@@ -16,11 +16,15 @@ import cv2
 import numpy as np
 from rapidfuzz import fuzz, process as fuzz_process
 
-from .config import green_factor_names, load_labels
+from .config import PROJECT_ROOT, green_factor_names, load_labels
 
 
 # Reader 初期化が重いのでグローバルキャッシュ
 _READER = None
+
+
+def _env_truthy(value: str | None) -> bool:
+    return (value or "").lower() in {"1", "true", "yes", "on"}
 
 
 def _get_reader():
@@ -30,12 +34,21 @@ def _get_reader():
 
         import easyocr
 
-        # Cloud Run 等で事前 DL したモデル置き場を尊重
+        # Cloud Run 等で事前 DL したモデル置き場を尊重。
+        # 未指定のローカル実行ではホームディレクトリに触らず、workspace 配下へ保存する。
         model_dir = os.environ.get("EASYOCR_MODULE_PATH")
+        download_enabled = os.environ.get("EASYOCR_DOWNLOAD_ENABLED")
         kwargs = {"gpu": False, "verbose": False}
         if model_dir:
-            kwargs["model_storage_directory"] = model_dir
-            kwargs["download_enabled"] = False
+            storage_dir = model_dir
+            kwargs["download_enabled"] = _env_truthy(download_enabled)
+        else:
+            storage_dir = str(PROJECT_ROOT / "models" / "easyocr")
+            kwargs["download_enabled"] = not (
+                download_enabled is not None and not _env_truthy(download_enabled)
+            )
+        kwargs["model_storage_directory"] = storage_dir
+        kwargs["user_network_directory"] = str(PROJECT_ROOT / "models" / "easyocr_user_network")
         # 緑因子（固有スキル）には英字混じりが多いため en も併用
         _READER = easyocr.Reader(["ja", "en"], **kwargs)
     return _READER

@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+pytest-cache-files-*/
 
 # 仮想環境
 .venv/
@@ -14,7 +15,12 @@ config/*.secret.json
 .env
 
 # モデルバイナリ（サイズが大きいため除外）
+# 例外: ★分類器は軽量かつ推論に必須なのでリポジトリに含める
 models/**/*.onnx
+!models/modules/star_classifier/
+!models/modules/star_classifier/labels.json
+!models/modules/star_classifier/prediction.onnx
+!models/modules/star_classifier/prediction.onnx.data
 
 # デバッグ出力
 debug_crops/
@@ -29,7 +35,9 @@ debug_*.png
 datasets/stars/
 datasets/finetune/
 artifacts/
-models/modules/star_classifier/
+models/easyocr/
+models/easyocr_user_network/
+outputs/
 # テンプレマッチ用の正解 crop（datasets/red_blue_templates, star_templates,
 # green_name_templates）はパッケージの一部として commit する
 

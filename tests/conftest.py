@@ -18,7 +18,15 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
-REC_PATH = ROOT / "tests" / "fixtures" / "colored_factors" / "recognition_results.json"
+_DEFAULT_REC_PATH = ROOT / "tests" / "fixtures" / "colored_factors" / "recognition_results.json"
+
+
+def _recognition_results_path() -> Path:
+    value = os.environ.get("UMAFACTOR_RECOGNITION_RESULTS")
+    if not value:
+        return _DEFAULT_REC_PATH
+    path = Path(value)
+    return path if path.is_absolute() else ROOT / path
 
 
 @pytest.fixture(scope="session")
@@ -33,9 +41,11 @@ def recognition_results() -> dict:
     コード修正のたびに pytest 側で analyze_image を呼ぶと 26 画像 × 15s ≈ 6分で
     とても重くなるため、認識は scripts 側で一括してキャッシュする運用にする。
     """
-    if not REC_PATH.exists():
+    rec_path = _recognition_results_path()
+    if not rec_path.exists():
         pytest.fail(
-            f"{REC_PATH} が存在しません。"
-            "まず `.venv/Scripts/python.exe scripts/batch_recognize.py` を実行してください。"
+            f"{rec_path} が存在しません。"
+            "先に `python scripts/run_phase0_regression.py --refresh` "
+            "または `python scripts/batch_recognize.py` を実行してください。"
         )
-    return json.loads(REC_PATH.read_text(encoding="utf-8"))
+    return json.loads(rec_path.read_text(encoding="utf-8"))
