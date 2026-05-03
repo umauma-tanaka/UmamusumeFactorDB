@@ -22,38 +22,52 @@
 - `umacapture` の scraper / stitcher / recognizer の分離方針を参考にする。
 - 現行の `cropper.py` と `pipeline.py` は、既存挙動を保つ互換レイヤーとして一時的に残す。
 
+## 実装後アップデート（2026-05-04）
+
+Phase 0 から Phase 3 までの実装を通して、当初計画から以下の変更が発生した。
+
+- Phase 0 の基準は `tests/fixtures/colored_factors/recognition_results.json` を常時保持する方式ではなく、`scripts/run_phase0_regression.py --refresh --skip-ocr --compare-golden` で `outputs/phase0/<run_id>/recognition_results.json` を生成し、`tests/fixtures/colored_factors/phase0_golden_skip_ocr.json` と比較する方式にした。
+- OCR はフル回帰の主目的から外し、リファクタリング確認では `--skip-ocr` を標準にした。OCR 精度・速度改善は別フェーズで扱う。
+- `models/modules/star_classifier/prediction.onnx` は提供済みになったため、星分類は ONNX 経路を標準とする。HSV fallback は ONNX 欠落時の明示 opt-in のみ維持する。
+- Phase 1 は当初の `candidate_fusion.py` だけでなく、`slots.py`、`candidate_generation.py`、`star_rank.py`、`assignment.py`、`green_prepass.py`、`characters.py`、`image_crops.py`、`factor_recognition.py`、`context.py`、`results.py` まで小分けで抽出済み。
+- Phase 2 は `detection/sections.py`、`detection/stars.py`、`detection/rows.py`、`detection/boxes.py`、`detection/types.py`、`detection/constants.py` へ分割済み。`cropper.py` は互換 facade として残す方針に変更なし。
+- Phase 3 は `recognition/model_registry.py`、`recognition/onnx_runtime.py`、`recognition/stars.py` を追加し、`infer.py` を互換 facade 化した。計画上の `recognition/factor_rank.py` と `recognition/character.py` は新設せず、既に抽出済みの `recognition/star_rank.py` と `recognition/characters.py` を正式な分割先として扱う。
+- `scripts/check_test_env.py --include-model-io` で ONNX 入力 shape と出力名を確認できるようにした。
+- 次の Phase 4 は、`pipeline.py` に残る orchestration と結果構築の分離に集中する。認識ロジックの大半は既に `recognition/` 配下へ移動済みのため、Phase 4 のスコープを当初計画より狭める。
+
 ## 未確定事項
 
 - 入力画像は、結合済みの因子画像だけを扱うのか、生のスクロール連続画像も扱うのか。
 - `config/scene_stitcher.json` はローカル値と `umacapture` 上流値のどちらを正とするか。
-- `star_classifier` はローカル独自拡張として維持するのか、上流寄せの rank model 中心へ戻すのか。
+- `star_classifier` は当面ローカル独自拡張として維持する。将来 `umacapture` 寄せにする場合は、rank model fallback との役割分担を別途再設計する。
 - ONNX モデルを zip から自動展開するか、明示配置を前提にするか。
+- Phase 5 の画像結合評価に使う、生スクロール連続画像 fixture をどこから取得するか。
 
 ## ブロッカー
 
-- 現状では `tests/fixtures/colored_factors/recognition_results.json` が存在せず、既存の pytest がそのままでは回らない。
-- `pytest` がローカル環境に未導入だったため、現時点で回帰テストを実行できていない。
-- `models/modules/star_classifier/prediction.onnx` が見当たらないため、星分類経路は実行時に失敗する可能性がある。
+- Phase 4 に進む上でのブロッカーは現時点ではない。
+- `tests/fixtures/colored_factors/recognition_results.json` は常設しない運用にしたため、`tests/test_recognition.py` 単体実行時は `UMAFACTOR_RECOGNITION_RESULTS` を指定するか、先に Phase 0 回帰を refresh する必要がある。
+- Phase 5 の画像結合評価には、生スクロール連続画像 fixture が必要。現状の 56 枚 full fixture だけでは stitcher の定量評価は不足する。
 
 ## 現状の問題
 
 ### `pipeline.py`
 
-画像読込、正規化、セクション検出、候補生成、ONNX 推論、OCR、テンプレート照合、候補マージ、スロット確定、レビュー項目生成、Submission 生成が 1 ファイルに集中している。
+画像読込、正規化、認識実行の orchestration、レビュー項目生成、Submission 生成がまだ 1 ファイルに残っている。
 
-この状態では、因子名の改善、星数判定の改善、結合精度の改善、レビュー UI 用データ生成の変更が相互に影響しやすい。
+候補生成、候補統合、slot 割当、character 認識、結果整形の一部は `recognition/` と `results.py` へ抽出済み。次は `analyze_image()` の公開 API を維持したまま、残った orchestration と結果構築を `app/` に移す。
 
 ### `cropper.py`
 
-画像正規化、ウマ娘セクション検出、因子行検出、星検出、星クラスタリング、FactorBox 生成、legacy fallback が同居している。
+Phase 2 で `detection/` 配下へ分割済み。
 
-`umacapture` 由来の背景色スキャン型の考え方と、現在の HSV / star 主導の検出が混在しており、どちらが主経路なのか読み取りにくい。
+`cropper.py` は互換 facade として残す。今後の改善対象は `detection/sections.py`、`detection/rows.py`、`detection/stars.py`、`detection/boxes.py` 側で扱う。
 
 ### `infer.py`
 
-ONNX Runtime の汎用ラッパー、factor 用 softmax 出力追加、カテゴリ制限推論、perturbation、star classifier が同居している。
+Phase 3 で `recognition/onnx_runtime.py`、`recognition/model_registry.py`、`recognition/stars.py` へ分割済み。
 
-モデル仕様の検証、モデルロード、推論戦略、特殊モデル対応を分ける必要がある。
+`infer.py` は互換 facade として残す。必須モデル確認と ONNX I/O 表示は `model_registry.py` と `scripts/check_test_env.py --include-model-io` で扱う。
 
 ### `templates.py`
 
@@ -96,9 +110,12 @@ src/umafactor/
   recognition/
     onnx_runtime.py          # ONNX Runtime wrapper
     model_registry.py        # model path, labels, required model validation
-    character.py             # CharacterRecognizer
-    factor_name.py           # FactorNameRecognizer
-    factor_rank.py           # FactorRankRecognizer
+    characters.py            # CharacterRecognizer
+    candidate_generation.py  # FactorNameRecognizer 相当の候補生成
+    star_rank.py             # FactorRankRecognizer 相当の星ランク推論
+    assignment.py            # 候補からスロット結果への割当
+    factor_recognition.py    # FactorRecognizer 相当の認識実行
+    context.py               # predictor / OCR / config の実行時依存
     ocr.py                   # OCR adapter。既存 ocr.py の整理先
     template_matcher.py      # 汎用 TemplateMatcher
     candidate_fusion.py      # ONNX / OCR / template の統合
@@ -359,6 +376,24 @@ outputs/debug/<run_id>/<case_id>/
 
 ### Regression test
 
+現行のリファクタリング回帰は、画像処理の正誤を評価するものではなく、リファクタリング前後で同じ結果が得られることを確認する golden 比較とする。
+
+現行コマンド:
+
+```
+python scripts/run_phase0_regression.py --refresh --skip-ocr --compare-golden
+```
+
+golden:
+
+```
+tests/fixtures/colored_factors/phase0_golden_skip_ocr.json
+```
+
+単体の `tests/test_recognition.py` を使う場合は、`UMAFACTOR_RECOGNITION_RESULTS` で生成済み JSON を指定する。
+
+将来のケース単位 regression fixture 案:
+
 ```
 tests/fixtures/recognition_cases/
   sample_001/
@@ -375,6 +410,8 @@ tests/fixtures/recognition_cases/
 python scripts/run_regression.py --cases tests/fixtures/recognition_cases
 python -m pytest tests/test_recognition.py
 ```
+
+上記 `run_regression.py` はまだ未実装。Phase 4 以降で `evaluation/runner.py` を作る時に統合する。
 
 ### Stitch test
 
@@ -398,6 +435,10 @@ tests/fixtures/stitch_cases/
 
 ### Benchmark
 
+現時点では専用 benchmark runner は未実装。Phase 0 回帰の report と `batch_recognize.log` で総処理時間を確認している。
+
+将来コマンド案:
+
 ```
 python scripts/benchmark_pipeline.py --cases tests/fixtures/recognition_cases --repeat 3
 ```
@@ -413,24 +454,26 @@ outputs/evaluation/<timestamp>/
 
 ## 移行計画
 
-### Phase 0: 現状固定
+### Phase 0: 現状固定（完了）
 
 目的: リファクタリング前の基準値を作る。
 
 作業:
 
-- `recognition_results.json` を再生成できるコマンドを整備する。
-- 現在の fixture で期待値 JSON を固定する。
-- モデル存在確認コマンドを追加する。
+- `scripts/run_phase0_regression.py` で回帰レポートを生成する。
+- `tests/fixtures/colored_factors/phase0_golden_skip_ocr.json` を golden として固定する。
+- `scripts/check_test_env.py` で依存 package、fixture、モデル存在確認を行う。
+- OCR スキップ時でも基本機能の回帰を確認できるようにする。
 
 完了条件:
 
 - 1 コマンドで regression 実行ができる。
 - 失敗時に不足ファイルか認識差分かが区別できる。
+- golden 比較で `golden diffs: 0` を確認できる。
 
-### Phase 1: 型とデバッグ基盤の追加
+### Phase 1: 型とデバッグ基盤の追加（完了）
 
-目的: 既存処理を移動する前に、共通データ構造を作る。
+目的: 既存処理を移動する前に、共通データ構造と認識ヘルパーを作る。
 
 作業:
 
@@ -438,18 +481,32 @@ outputs/evaluation/<timestamp>/
 - `core/debug.py`
 - `evaluation/metrics.py`
 - `recognition/candidate_fusion.py`
+- `recognition/slots.py`
+- `recognition/candidate_generation.py`
+- `recognition/star_rank.py`
+- `recognition/assignment.py`
+- `recognition/green_prepass.py`
+- `recognition/characters.py`
+- `recognition/image_crops.py`
+- `recognition/image_preprocessing.py`
+- `recognition/context.py`
+- `recognition/factor_recognition.py`
+- `results.py`
 
 完了条件:
 
-- 既存の `pipeline.py` から候補マージだけを移しても結果が変わらない。
+- 既存の `pipeline.py` から候補生成、候補統合、slot 割当、character 認識、結果整形を移しても結果が変わらない。
 - debug manifest が生成できる。
+- 各抽出単位に unit test がある。
 
-### Phase 2: `cropper.py` の分割
+### Phase 2: `cropper.py` の分割（完了）
 
 目的: 画像検出系を責務ごとに分ける。
 
 作業:
 
+- `detection/constants.py`
+- `detection/types.py`
 - `detection/sections.py`
 - `detection/stars.py`
 - `detection/rows.py`
@@ -461,7 +518,7 @@ outputs/evaluation/<timestamp>/
 - `extract_factor_boxes()` の既存呼び出しが壊れない。
 - 検出 overlay を debug output に出せる。
 
-### Phase 3: `infer.py` の分割
+### Phase 3: `infer.py` の分割（完了）
 
 目的: ONNX モデル管理と推論戦略を分ける。
 
@@ -469,31 +526,46 @@ outputs/evaluation/<timestamp>/
 
 - `recognition/model_registry.py`
 - `recognition/onnx_runtime.py`
-- `recognition/factor_rank.py`
-- `recognition/character.py`
 - `recognition/stars.py`
+- `infer.py` を互換 facade にする。
+- `recognition/context.py` と `detection/boxes.py` の依存先を分割後モジュールへ向ける。
+
+計画変更:
+
+- `recognition/factor_rank.py` と `recognition/character.py` は新設しない。既に抽出済みの `recognition/star_rank.py` と `recognition/characters.py` を継続利用する。
 
 完了条件:
 
 - 必須モデルの有無を起動時またはテスト時に検査できる。
 - ONNX 入力 shape と出力名をログに出せる。
+- `infer.py` の既存 import surface が壊れない。
 
-### Phase 4: `pipeline.py` の分割
+### Phase 4: `pipeline.py` の分割（次フェーズ）
 
-目的: orchestration と認識ロジックを分離する。
+目的: `pipeline.py` に残った orchestration、入出力処理、結果構築を分離する。
+
+実装後の計画変更:
+
+- 認識ロジックの大半は Phase 1 で `recognition/` 配下へ移動済みのため、Phase 4 では新しい認識アルゴリズムを作らない。
+- `analyze_image()` の公開 API は維持し、内部実装だけを `app/analyzer.py` へ移す。
+- `pipeline.py` はしばらく互換 facade として残す。
 
 作業:
 
 - `app/analyzer.py`
 - `app/result_builder.py`
-- `recognition/factor_name.py`
-- `recognition/template_matcher.py`
-- `recognition/ocr.py`
+- `pipeline.py` から入力画像読込、正規化、認識実行、Submission 生成の orchestration を段階的に移す。
+- `recognition/factor_recognition.py` の呼び出し単位を `UmaFactorAnalyzer` から扱える形に整える。
+- `results.py` と `schema.py` の境界を整理し、Submission / ReviewQueue 生成を `app/result_builder.py` に寄せる。
+- 既存 `ocr.py` は Phase 4 では移動しない。OCR adapter 化は PaddleOCR 等を検討する別フェーズに回す。
+- `templates.py` の `template_matcher.py` 化は、Phase 4 の後半または Phase 6 とする。まずは `pipeline.py` の責務削減を優先する。
 
 完了条件:
 
 - `analyze_image()` は薄い facade になる。
-- `FactorRecognizer` 単体で候補一覧をテストできる。
+- `UmaFactorAnalyzer` 単体で、画像 path から `Submission` と `ReviewQueue` を生成する流れをテストできる。
+- Phase 0 golden 比較で `golden diffs: 0` を維持する。
+- 既存の `tests/test_factor_recognition.py`、`tests/test_results.py`、`tests/test_context.py` が継続して通る。
 
 ### Phase 5: `umacapture` 寄せの画像結合を追加
 
@@ -505,6 +577,7 @@ outputs/evaluation/<timestamp>/
 - `capture/stitcher.py`
 - `capture/scraper_types.py`
 - stitch regression fixture を追加する。
+- 生スクロール連続画像 fixture を取得する。現行の 56 枚 full fixture は認識回帰用であり、stitcher 評価には不足する。
 
 完了条件:
 
@@ -526,23 +599,23 @@ outputs/evaluation/<timestamp>/
 - 閾値変更は定数化し、評価結果とセットで記録する。
 - fallback 経路は debug manifest に残す。
 
-## 推奨する最初の変更
+## 次に推奨する変更
 
-最初に行うべき変更は、候補統合と評価基盤の分離。
+次に行うべき変更は、`pipeline.py` の orchestration を `app/analyzer.py` へ移すこと。
 
 理由:
 
-- `pipeline.py` の中でも副作用が少ない。
-- 精度改善の影響を定量化する土台になる。
-- ONNX、OCR、画像検出の大きな移動に入る前にテスト可能な単位を作れる。
+- Phase 1 から Phase 3 で、認識ヘルパー、検出、ONNX 推論の主要責務は既に分割済み。
+- 残る大きな混在箇所は、入力画像読込、正規化、認識実行、結果構築をまとめて扱う `pipeline.py`。
+- ここを薄くすると、後続の画像結合や OCR adapter 変更を `analyze_image()` の外部 API を維持したまま進めやすくなる。
 
-最初の PR 候補:
+次の PR 候補:
 
-1. `recognition/candidate_fusion.py` を追加する。
-2. `_merge_candidates` と `_merge_candidates_v2` を移動する。
-3. 既存 `pipeline.py` から import して使う。
-4. `tests/test_candidate_fusion.py` を追加する。
-5. 認識結果が変わらないことを regression で確認する。
+1. `src/umafactor/app/__init__.py` と `src/umafactor/app/analyzer.py` を追加する。
+2. `pipeline.py` の `analyze_image()` 本体から、入力画像読込と全体 orchestration を `UmaFactorAnalyzer` へ移す。
+3. `pipeline.py` の `analyze_image()` は既存公開 API を保つ薄い wrapper にする。
+4. `tests/test_analyzer.py` を追加し、依存関数を fake にして orchestration の順序と結果構築を確認する。
+5. `python scripts/run_phase0_regression.py --refresh --skip-ocr --compare-golden` で golden 差分 0 を確認する。
 
 ## 参照
 
