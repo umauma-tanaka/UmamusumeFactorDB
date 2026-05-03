@@ -30,6 +30,10 @@ from .recognition.candidate_fusion import (
     merge_candidates as _merge_candidates,
     merge_candidates_v2 as _merge_candidates_v2,
 )
+from .recognition.characters import (
+    apply_unique_skill_character_overrides,
+    recognize_characters,
+)
 from .recognition.green_prepass import compute_green_prepass
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
@@ -93,10 +97,7 @@ def analyze_image(
     review = ReviewQueue()
     white_counters = {0: 0, 1: 0, 2: 0}
 
-    for section in sections:
-        icon = _extract_character_icon_bgr(norm_img, section)
-        pred = char_pred.predict(icon)
-        umas[section.uma_index].character = pred.label
+    recognize_characters(umas, sections, norm_img, char_pred)
 
     # Pass 0: 各 uma の緑 box 候補について OCR top1 conf と最大 gold_star_count を
     # 別々に事前計算する。従来の「gold_star_count>0 の先着 box を採用」だと、
@@ -268,18 +269,7 @@ def analyze_image(
     # 注: 継承タブ画像（親由来の継承スキル）では逆引き先が自分の衣装と一致せず
     # 誤上書きする副作用があるが、育成情報タブ画像での精度向上を優先するため
     # 無条件適用とする。タブ種別が画像から判別できるようになれば再検討する。
-    unique_map = load_unique_skill_to_character()
-    if unique_map:
-        for uma in umas:
-            if not uma.green_name:
-                continue
-            # OCR が前後スペースを含む green_name を返すケースに備え、strip した値でも照合する。
-            # uma.green_name 本体は変更せず、逆引きのキーマッチング時のみ正規化する。
-            key_candidates = [uma.green_name, uma.green_name.strip()]
-            for k in key_candidates:
-                if k in unique_map:
-                    uma.character = unique_map[k]
-                    break
+    apply_unique_skill_character_overrides(umas, load_unique_skill_to_character())
 
     import os
     submission = Submission(
