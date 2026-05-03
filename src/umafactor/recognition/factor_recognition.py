@@ -13,10 +13,18 @@ from .candidate_generation import (
     FactorPredictorLike,
     recognize_factor_candidates,
 )
+from .characters import apply_unique_skill_character_overrides, recognize_characters
+from .context import RecognitionContext
+from .green_prepass import compute_green_prepass
 from .image_crops import display_crop_for_slot
+from .image_preprocessing import PreparedFactorImage
 from .slots import SlotFlags, classify_factor_slot, should_adopt_green_box
-from .star_rank import RankPredictorLike, predict_factor_star
-from ..review import ReviewItem
+from .star_rank import (
+    RankPredictorLike,
+    apply_missing_green_star_fallbacks,
+    predict_factor_star,
+)
+from ..review import ReviewItem, ReviewQueue
 from ..schema import UmaFactors
 
 
@@ -35,6 +43,12 @@ class RecognizedFactorBox:
     review_item: ReviewItem
     slot_flags: SlotFlags
     green_adoptable: bool
+
+
+@dataclass(frozen=True)
+class FactorRecognitionResult:
+    umas: list[UmaFactors]
+    review: ReviewQueue
 
 
 def recognize_factor_box(
@@ -117,3 +131,49 @@ def recognize_factor_box(
         star,
     )
     return RecognizedFactorBox(review_item, slot_flags, green_adoptable)
+
+
+def run_factor_recognition(
+    prepared: PreparedFactorImage,
+    context: RecognitionContext,
+    unique_skill_to_character: dict[str, str],
+) -> FactorRecognitionResult:
+    img_orig = prepared.img_orig
+    norm_img = prepared.norm_img
+    scale = prepared.scale
+    sections = prepared.sections
+    boxes = prepared.boxes
+
+    umas = [UmaFactors(), UmaFactors(), UmaFactors()]
+    review = ReviewQueue()
+    white_counters = {0: 0, 1: 0, 2: 0}
+
+    recognize_characters(umas, sections, norm_img, context.char_pred)
+
+    green_prepass = compute_green_prepass(boxes, img_orig, scale, context.ocr)
+    best_green_box = green_prepass.best_green_box
+    best_green_score = green_prepass.best_green_score
+    any_green_gold = green_prepass.any_green_gold
+
+    for box in boxes:
+        recognized = recognize_factor_box(
+            umas,
+            white_counters,
+            context.factor_pred,
+            context.rank_pred,
+            context.ocr,
+            img_orig,
+            norm_img,
+            box,
+            boxes,
+            scale,
+            context.green_name_set,
+            best_green_box,
+            best_green_score,
+        )
+        review.add(recognized.review_item)
+
+    apply_missing_green_star_fallbacks(umas, any_green_gold)
+    apply_unique_skill_character_overrides(umas, unique_skill_to_character)
+
+    return FactorRecognitionResult(umas=umas, review=review)
