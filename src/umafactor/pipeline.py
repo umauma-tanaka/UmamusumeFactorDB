@@ -19,6 +19,7 @@ from .recognition.image_preprocessing import (
     dump_debug_crops as _dump_debug_crops,
     prepare_factor_image,
 )
+from .results import apply_review_results, build_submission
 from .review import ReviewQueue
 from .schema import Submission
 
@@ -45,35 +46,9 @@ def analyze_image(
     )
     umas = recognition.umas
 
-    import os
-    submission = Submission(
+    submission = build_submission(
         submitter_id=submitter_id,
-        image_filename=os.path.basename(image_path),
-        main=umas[0],
-        parent1=umas[1],
-        parent2=umas[2],
+        image_path=image_path,
+        umas=umas,
     )
     return submission, recognition.review
-
-
-def apply_review_results(submission: Submission, review: ReviewQueue) -> None:
-    """ユーザレビュー後の ReviewItem の reviewed_name / reviewed_star を Submission に反映。"""
-    umas = [submission.main, submission.parent1, submission.parent2]
-    for item in review.items:
-        if item.reviewed_name is None:
-            continue
-        uma = umas[item.uma_index]
-        star = item.reviewed_star if item.reviewed_star is not None else item.current_star
-        if item.slot == "blue":
-            uma.blue_type = item.reviewed_name
-            uma.blue_star = star
-        elif item.slot == "red":
-            uma.red_type = item.reviewed_name
-            uma.red_star = star
-        elif item.slot == "green":
-            uma.green_name = item.reviewed_name
-            uma.green_star = star
-        elif item.slot == "white":
-            if 0 <= item.white_index < len(uma.skills):
-                uma.skills[item.white_index].name = item.reviewed_name
-                uma.skills[item.white_index].star = star
