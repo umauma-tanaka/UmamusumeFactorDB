@@ -19,14 +19,11 @@ from .cropper import (
 )
 from .infer import get_predictor
 from .ocr import get_ocr
-from .recognition.assignment import apply_factor_result, build_review_item
-from .recognition.candidate_generation import (
-    recognize_factor_candidates,
-)
 from .recognition.characters import (
     apply_unique_skill_character_overrides,
     recognize_characters,
 )
+from .recognition.factor_recognition import recognize_factor_box
 from .recognition.green_prepass import compute_green_prepass
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
@@ -35,13 +32,8 @@ from .recognition.image_crops import (
     display_crop_from_original as _display_crop_from_original,
     extract_character_icon_bgr as _extract_character_icon_bgr,
 )
-from .recognition.slots import (
-    classify_factor_slot,
-    should_adopt_green_box,
-)
 from .recognition.star_rank import (
     apply_missing_green_star_fallbacks,
-    predict_factor_star,
 )
 from .review import ReviewQueue
 from .schema import Submission, UmaFactors
@@ -108,101 +100,22 @@ def analyze_image(
     any_green_gold = green_prepass.any_green_gold
 
     for box in boxes:
-        x0, y0, x1, y1 = box.bbox
-        text_crop_norm = norm_img[y0:y1, x0:x1]
-
-        # 色チップ検出が弱い合成画像で box.color が "white" / 逆の青赤 に落ちても、
-        # 因子が常に決まった位置に並ぶゲーム UI 構造を使って位置で補正する。
-        #   row 0 col 0 → 青因子（左上）
-        #   row 0 col 1 → 赤因子（青の右）
-        #   row 1 col 0 → 緑因子（青の下）
-        # は必ず存在するため、この 3 セルは位置で絶対確定し color 判定は無視する。
-        # これで「緑因子が色判定 white に落ちて白スキル行に混入」「row 0 col 1 が
-        # 青と誤判定され blue slot に先取りされる」等の事故を防ぐ。
-        # row>=2 col=0 で色判定 green になる box（稀だが本物緑が cropper の
-        # 都合で row=2 側に検出される画像あり）は fallback で緑スロット候補に残す。
-        slot_flags = classify_factor_slot(box)
-        is_blue_slot = slot_flags.is_blue
-        is_red_slot = slot_flags.is_red
-        is_green_slot = slot_flags.is_green
-
-        # この box が本当に緑スロットとして採用される見込みがあるか。
-        # is_green_slot=True でも best_green_box に選ばれなかった box は結局
-        # skills 行きになるため、緑辞書（249 種の固有スキル）OCR 処理をすると
-        # skills に緑辞書マッチ名が紛れ込む（例: '白い稲妻、見せたるで！'）。
-        # 緑として採用される見込みがない box は通常 OCR ルートに流し、
-        # 緑辞書は緑スロットに限定する。uma.green_name の逐次状態で先着判定。
-        uidx_cur = box.uma_index
-        green_adoptable = should_adopt_green_box(
-            box,
-            boxes,
-            is_green_slot=is_green_slot,
-            current_green_name=umas[uidx_cur].green_name,
-            best_green_box=best_green_box.get(uidx_cur),
-            best_green_score=best_green_score.get(uidx_cur, 0.0),
-        )
-
-        # 青スロットは box.bbox が★中心基準で算出されており、一部画像で因子名
-        # テキストが bbox 下端からはみ出して OCR 入力に映らない問題がある。
-        # display_crop の pad_y_norm を 8 に拡大することで「スピード」「スタミナ」等が
-        # OCR で拾えるようになり青 +3 件改善を確認。
-        # 赤は pad_y_norm 両方向拡張（Exp 3）で「長距離→マイル」悪化が発生したが、
-        # 真因は bbox が★中心基準で上にズレてテキストが下端にはみ出すこと。
-        # display_crop の元 bbox を y1 のみ +14 に拡張（y0 は維持）で、上の行を
-        # 含まずテキストだけを入れる非対称 pad に変更する。
-        display_crop = _display_crop_for_slot(
-            img_orig,
-            norm_img.shape,
-            box.bbox,
-            scale,
-            is_blue_slot=is_blue_slot,
-            is_red_slot=is_red_slot,
-        )
-        candidate_recognition = recognize_factor_candidates(
+        recognized = recognize_factor_box(
+            umas,
+            white_counters,
             factor_pred,
+            rank_pred,
             ocr,
             img_orig,
-            text_crop_norm,
-            display_crop,
-            box.bbox,
-            scale,
-            is_blue_slot=is_blue_slot,
-            is_red_slot=is_red_slot,
-            green_adoptable=green_adoptable,
-            green_name_set=green_name_set,
-        )
-        merged = candidate_recognition.candidates
-        sources = candidate_recognition.sources
-        top_name = candidate_recognition.top_name
-        ocr_raw = candidate_recognition.ocr_raw
-
-        star = predict_factor_star(rank_pred, img_orig, box, scale)
-
-        assignment = apply_factor_result(
-            umas[box.uma_index],
-            white_counters,
-            img_orig,
+            norm_img,
             box,
             boxes,
             scale,
-            top_name,
-            star,
-            is_blue_slot=is_blue_slot,
-            is_red_slot=is_red_slot,
-            green_adoptable=green_adoptable,
+            green_name_set,
+            best_green_box,
+            best_green_score,
         )
-        review.add(
-            build_review_item(
-                box,
-                assignment,
-                display_crop,
-                merged,
-                sources,
-                ocr_raw,
-                top_name,
-                star,
-            )
-        )
+        review.add(recognized.review_item)
 
     # Pass 2: 緑 col=1 除外により uma.green_name が未採用だが、★は col=1 に
     # 残っているケースがある（受領 1558 parent1/parent2 等）。name は空のまま
