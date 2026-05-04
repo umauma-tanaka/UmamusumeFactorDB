@@ -90,7 +90,7 @@ class PaddleFactorOCR:
 
 
 def _prepare_paddle_cache(cache_dir: Path | None) -> None:
-    root = cache_dir if cache_dir is not None else PROJECT_ROOT / "outputs" / "paddleocr_cache"
+    root = cache_dir if cache_dir is not None else PROJECT_ROOT / "paddleocr_cache"
     root = root.resolve()
     # PaddlePaddle 3.3.1 on Windows can fail in the detection pipeline through
     # oneDNN attribute conversion.  Disable it before importing paddleocr.
