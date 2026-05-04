@@ -642,6 +642,12 @@ outputs/evaluation/<timestamp>/
 4. `capture/stitcher.py` に重複帯の扱い、欠落検出、seam debug 出力を追加する。
 5. `evaluation` 側に stitch regression runner を追加する。
 
+## 別 PR 候補（2026-05-04 review follow-up）
+
+- `recognition.context` は predictor/OCR の具象生成と OCR private 属性参照を持っている。次フェーズでは OCR の public API、または app-level dependency provider に寄せ、context は依存を束ねるだけにする。
+- `recognition.image_preprocessing` は画像読込、正規化、検出、debug 書き出しを同時に持っている。`app/input_preparation.py`、`core/image.py`、debug sink への分離候補として扱う。
+- `capture.stitcher` は `MetadataOffsetEstimator` 具象型ではなく `OffsetEstimator` Protocol を受ける形にすると、AKAZE / RANSAC estimator を差し替えやすい。
+
 ## 参照
 
 - `umacapture` scene scraper: https://github.com/umasagashi/umacapture/blob/develop/native/src/chara_detail/chara_detail_scene_scraper.h

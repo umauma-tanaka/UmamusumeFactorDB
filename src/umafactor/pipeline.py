@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from .app.analyzer import UmaFactorAnalyzer
 from .app.result_builder import apply_review_results, build_submission
+from .recognition.constants import (
+    BLUE_FACTOR_TYPES,
+    PERTURBATIONS_BLUE,
+    PERTURBATIONS_RANK,
+    PERTURBATIONS_RED,
+    RED_FACTOR_TYPES,
+)
 from .recognition.image_crops import (
     crop_from_original as _crop_from_original,
     crop_rank_from_original as _crop_rank_from_original,
@@ -33,6 +40,11 @@ def analyze_image(
 
 
 __all__ = [
+    "BLUE_FACTOR_TYPES",
+    "PERTURBATIONS_BLUE",
+    "PERTURBATIONS_RANK",
+    "PERTURBATIONS_RED",
+    "RED_FACTOR_TYPES",
     "UmaFactorAnalyzer",
     "_crop_from_original",
     "_crop_rank_from_original",

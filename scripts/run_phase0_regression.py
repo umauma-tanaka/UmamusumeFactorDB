@@ -35,6 +35,7 @@ from umafactor.core.debug import (  # noqa: E402
 )
 from umafactor.evaluation.metrics import (  # noqa: E402
     BASIC_FIELDS,
+    FIELDS,
     compare_golden,
     evaluate,
     filter_expected_rows,
