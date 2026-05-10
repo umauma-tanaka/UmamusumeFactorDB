@@ -66,6 +66,17 @@ def test_detect_stitched_factor_list_parent_tiles_matches_expected_star_sequence
     assert metrics["missing_count"] == 0
 
 
+def test_detect_stitched_factor_list_sections_do_not_overlap() -> None:
+    image = cv2.imread(str(CASE_DIR / "expected_stitched.png"))
+    assert image is not None
+
+    detections = [detect_stitched_factor_list(image, section_index=index) for index in range(3)]
+    bbox_sets = [{tile.bbox for tile in detection.tiles} for detection in detections]
+
+    assert bbox_sets[0].isdisjoint(bbox_sets[1])
+    assert bbox_sets[1].isdisjoint(bbox_sets[2])
+
+
 def test_recognize_factor_list_tile_names_fills_raw_names_for_evaluation() -> None:
     image = cv2.imread(str(CASE_DIR / "expected_stitched.png"))
     assert image is not None
@@ -158,6 +169,10 @@ def test_evaluate_factor_ocr_writes_all_section_overlays() -> None:
             assert overlay is not None, filename
             assert overlay.shape[0] == original.shape[0]
             assert overlay.shape[1] > original.shape[1]
+        combined = cv2.imread(str(output_dir / "all_roles_overlay.png"))
+        assert combined is not None
+        assert combined.shape[0] == original.shape[0]
+        assert combined.shape[1] > original.shape[1]
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
 

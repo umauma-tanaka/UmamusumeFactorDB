@@ -7,6 +7,7 @@ import cv2
 
 from umafactor.capture.scraper_types import ScrollFrame
 from umafactor.capture.static_stitch import (
+    detect_dynamic_roi,
     estimate_pair_offset,
     load_scroll_frames_from_dir,
     stitch_static_scroll_frames,
@@ -131,6 +132,26 @@ def test_stitch_static_scroll_frames_scales_with_image_size() -> None:
     assert len(offsets) == 3
     assert abs(offsets[1] - 74) <= 2
     assert abs(offsets[2] - 148) <= 4
+
+
+def test_detect_dynamic_roi_uses_contour_when_projection_falls_back_to_full_screen() -> None:
+    base = np.full((500, 1000, 3), 240, dtype=np.uint8)
+    previous = base.copy()
+    current = base.copy()
+    for x0 in (260, 390, 520):
+        cv2.rectangle(previous, (x0, 180), (x0 + 90, 330), (80, 80, 80), -1)
+        cv2.rectangle(current, (x0, 180), (x0 + 90, 330), (150, 150, 150), -1)
+    frames = (
+        ScrollFrame(previous, frame_index=0),
+        ScrollFrame(current, frame_index=1),
+    )
+
+    roi = detect_dynamic_roi(frames)
+
+    assert roi.rect.width < previous.shape[1]
+    assert roi.rect.height < previous.shape[0]
+    assert 220 <= roi.rect.x0 <= 280
+    assert 600 <= roi.rect.x1 <= 660
 
 
 def test_load_scroll_frames_ignores_expected_images() -> None:

@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Sequence
@@ -25,8 +24,17 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from evaluate_factor_ocr import _write_detected_csv, _write_overlay  # noqa: E402
-from umafactor.capture.static_stitch import stitch_static_scroll_frames  # noqa: E402
+from evaluate_factor_ocr import (  # noqa: E402
+    _role_name,
+    _write_combined_overlay,
+    _write_detected_csv,
+    _write_overlay,
+)
+from umafactor.capture.static_stitch import (  # noqa: E402
+    detect_dynamic_roi,
+    stitch_static_scroll_frames,
+)
+from umafactor.capture.control_window import create_capture_control  # noqa: E402
 from umafactor.capture.window_capture import (  # noqa: E402
     capture_window_frames,
     find_game_window,
@@ -38,6 +46,11 @@ from umafactor.detection.factor_list import (  # noqa: E402
     detect_stitched_factor_list,
 )
 from umafactor.recognition.factor_list_ocr import (  # noqa: E402
+    DEFAULT_OCR_CONTRAST_CLIP_LIMIT,
+    DEFAULT_OCR_MAX_UPSCALE,
+    DEFAULT_OCR_MIN_HEIGHT,
+    DEFAULT_OCR_MIN_WIDTH,
+    DEFAULT_OCR_SHARPEN_STRENGTH,
     recognize_factor_list_tile_names,
 )
 
@@ -67,56 +80,82 @@ def main() -> int:
     )
     print(f"output: {output_dir}")
 
-    if args.warmup > 0:
-        print(f"warmup: {args.warmup:.1f}s")
-        time.sleep(args.warmup)
+    control = create_capture_control(enabled=not args.no_control_window)
+    control.set_waiting(output_dir=output_dir, warmup_sec=args.warmup)
+    try:
+        if args.warmup > 0:
+            print(f"warmup: {args.warmup:.1f}s")
+            if not control.wait_warmup(args.warmup):
+                print("capture cancelled before start")
+                return 130
 
-    print(
-        "capturing: "
-        f"duration={args.duration:.1f}s fps={args.fps:.1f} "
-        f"backend={args.backend} region={args.region}"
-    )
-    frames = capture_window_frames(
-        window,
-        duration_sec=args.duration,
-        fps=args.fps,
-        backend=args.backend,
-        region=args.region,
-        min_frame_diff=args.min_frame_diff,
-    )
-    if not frames:
-        raise RuntimeError("no frames captured")
-    _write_frames(output_dir / "frames", frames)
+        print(
+            "capturing: "
+            f"duration={args.duration:.1f}s fps={args.fps:.1f} "
+            f"backend={args.backend} region={args.region}"
+        )
+        control.start_capture(duration_sec=args.duration, fps=args.fps)
+        frames = capture_window_frames(
+            window,
+            duration_sec=args.duration,
+            fps=args.fps,
+            backend=args.backend,
+            region=args.region,
+            min_frame_diff=args.min_frame_diff,
+            stop_requested=control.stop_requested,
+            progress_callback=lambda frame_count, elapsed_sec: control.update_capture(
+                frame_count=frame_count,
+                elapsed_sec=elapsed_sec,
+            ),
+        )
+        stopped_by_user = control.stop_requested()
+        if not frames:
+            raise RuntimeError("no frames captured")
+        control.mark_processing("キャプチャを終了しました。画像を書き出しています。")
+        _write_frames(output_dir / "frames", frames)
+        if args.debug:
+            _write_capture_debug(output_dir / "debug", frames, roi_limit=args.debug_roi_limit)
 
-    stitch = stitch_static_scroll_frames(
-        frames,
-        use_scrollbar_hint=args.use_scrollbar_hint,
-    )
-    stitched_path = output_dir / "stitched.png"
-    cv2.imwrite(str(stitched_path), stitch.image)
-    _write_json(output_dir / "stitch_metadata.json", stitch.to_metadata())
-    _write_json(
-        output_dir / "capture_metadata.json",
-        {
-            "window": window.to_dict(),
-            "frame_count": len(frames),
-            "requested_backend": args.backend,
-            "region": args.region,
-            "duration_sec": args.duration,
-            "fps": args.fps,
-            "min_frame_diff": args.min_frame_diff,
-            "use_scrollbar_hint": args.use_scrollbar_hint,
-            "source_frames": [frame.to_metadata() for frame in frames],
-            "stitched_path": str(stitched_path),
-        },
-    )
+        control.mark_processing("スクロール画像を結合しています。")
+        stitch = stitch_static_scroll_frames(
+            frames,
+            use_scrollbar_hint=args.use_scrollbar_hint,
+        )
+        stitched_path = output_dir / "stitched.png"
+        cv2.imwrite(str(stitched_path), stitch.image)
+        _write_json(output_dir / "stitch_metadata.json", stitch.to_metadata())
+        _write_json(
+            output_dir / "capture_metadata.json",
+            {
+                "window": window.to_dict(),
+                "frame_count": len(frames),
+                "requested_backend": args.backend,
+                "region": args.region,
+                "duration_sec": args.duration,
+                "fps": args.fps,
+                "min_frame_diff": args.min_frame_diff,
+                "use_scrollbar_hint": args.use_scrollbar_hint,
+                "stopped_by_user": stopped_by_user,
+                "source_frames": [frame.to_metadata() for frame in frames],
+                "stitched_path": str(stitched_path),
+            },
+        )
 
-    if not args.skip_ocr:
-        _run_factor_ocr(stitch.image, output_dir, args)
+        if not args.skip_ocr:
+            control.mark_processing("OCRを実行しています。")
+            _run_factor_ocr(stitch.image, output_dir, args)
 
-    print(f"frames: {len(frames)}")
-    print(f"stitched: {stitched_path}")
-    return 0
+        print(f"frames: {len(frames)}")
+        print(f"stitched: {stitched_path}")
+        control.mark_done(f"処理が完了しました。\n出力: {output_dir}")
+        control.hold(args.control_window_hold_seconds)
+        return 0
+    except Exception as exc:
+        control.mark_error(str(exc))
+        control.hold(args.control_window_hold_seconds)
+        raise
+    finally:
+        control.close()
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -146,6 +185,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=3.0,
         help="Seconds to wait before capture starts.",
+    )
+    parser.add_argument(
+        "--no-control-window",
+        action="store_true",
+        help="Disable the topmost capture status/stop window.",
+    )
+    parser.add_argument(
+        "--control-window-hold-seconds",
+        type=float,
+        default=2.0,
+        help="Seconds to keep the control window visible after completion or error.",
     )
     parser.add_argument(
         "--backend",
@@ -201,6 +251,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use detected scrollbar thumb motion as an optional weak stitch hint.",
     )
     parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write dynamic ROI masks and cropped ROI samples for stitch debugging.",
+    )
+    parser.add_argument(
+        "--debug-roi-limit",
+        type=int,
+        default=5,
+        help="Number of ROI crop samples to write when --debug is enabled.",
+    )
+    parser.add_argument(
         "--skip-ocr",
         action="store_true",
         help="Only capture and stitch. Do not run factor-list OCR.",
@@ -218,6 +279,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Name crop variant used when --ocr-crop-target=name.",
     )
     parser.add_argument(
+        "--disable-ocr-preprocess",
+        action="store_true",
+        help="Disable OCR crop upscaling, contrast normalization, and sharpening.",
+    )
+    parser.add_argument(
+        "--ocr-min-crop-width",
+        type=int,
+        default=DEFAULT_OCR_MIN_WIDTH,
+        help="Minimum OCR crop width after automatic upscaling.",
+    )
+    parser.add_argument(
+        "--ocr-min-crop-height",
+        type=int,
+        default=DEFAULT_OCR_MIN_HEIGHT,
+        help="Minimum OCR crop height after automatic upscaling.",
+    )
+    parser.add_argument(
+        "--ocr-max-upscale",
+        type=float,
+        default=DEFAULT_OCR_MAX_UPSCALE,
+        help="Maximum OCR crop upscale factor.",
+    )
+    parser.add_argument(
+        "--ocr-sharpen-strength",
+        type=float,
+        default=DEFAULT_OCR_SHARPEN_STRENGTH,
+        help="Unsharp mask strength applied to OCR crops. 0 disables sharpening.",
+    )
+    parser.add_argument(
+        "--ocr-contrast-clip-limit",
+        type=float,
+        default=DEFAULT_OCR_CONTRAST_CLIP_LIMIT,
+        help="CLAHE clip limit applied to OCR crop luminance. 0 disables contrast normalization.",
+    )
+    parser.add_argument(
+        "--ocr-execution-mode",
+        choices=["sequential", "canvas", "batch"],
+        default="canvas",
+        help="OCR execution strategy. canvas packs multiple cards into one PaddleOCR image.",
+    )
+    parser.add_argument(
+        "--ocr-batch-size",
+        type=int,
+        default=0,
+        help="Number of cards per OCR canvas or Paddle batch. 0 processes one OCR image per role.",
+    )
+    parser.add_argument(
+        "--ocr-canvas-padding",
+        type=int,
+        default=24,
+        help="Padding in pixels between cards when --ocr-execution-mode=canvas.",
+    )
+    parser.add_argument(
         "--paddle-cache-dir",
         type=Path,
         default=DEFAULT_CACHE_DIR,
@@ -228,13 +342,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--paddle-det-limit-side-len",
         type=int,
         default=128,
-        help="PaddleOCR text_det_limit_side_len for per-card OCR.",
+        help="PaddleOCR text_det_limit_side_len. Default preserves the prepared OCR canvas scale.",
     )
     parser.add_argument(
         "--paddle-det-limit-type",
         choices=["min", "max"],
         default="min",
-        help="PaddleOCR text_det_limit_type. min avoids shrinking card crops.",
+        help="PaddleOCR text_det_limit_type. min avoids shrinking prepared OCR canvases.",
     )
     parser.add_argument("--paddle-det-thresh", type=float, default=None)
     parser.add_argument("--paddle-det-box-thresh", type=float, default=None)
@@ -299,6 +413,23 @@ def _write_frames(output_dir: Path, frames: Sequence[Any]) -> None:
         cv2.imwrite(str(output_dir / f"frame_{frame.frame_index:04d}.png"), frame.image)
 
 
+def _write_capture_debug(output_dir: Path, frames: Sequence[Any], *, roi_limit: int) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    roi = detect_dynamic_roi(frames)
+    cv2.imwrite(str(output_dir / "dynamic_mask.png"), roi.mask)
+    for frame in frames[: max(0, roi_limit)]:
+        cv2.imwrite(str(output_dir / f"roi_{frame.frame_index:04d}.png"), roi.crop(frame.image))
+    _write_json(
+        output_dir / "debug_metadata.json",
+        {
+            "roi": list(roi.rect.as_tuple()),
+            "roi_source": roi.source,
+            "frame_count": len(frames),
+            "roi_samples": min(max(0, roi_limit), len(frames)),
+        },
+    )
+
+
 def _run_factor_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
     from umafactor.recognition.paddle_ocr_adapter import PaddleFactorOCR
 
@@ -314,34 +445,60 @@ def _run_factor_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
         text_rec_score_thresh=args.paddle_rec_score_thresh,
     )
     role_tiles: dict[str, Sequence[FactorListTile]] = {}
+    role_errors: dict[str, str] = {}
     for section_index in range(3):
+        role = _role_name(section_index)
         try:
             detection = detect_stitched_factor_list(image, section_index=section_index)
-        except IndexError:
-            continue
-        tiles = recognize_factor_list_tile_names(
-            image,
-            detection.tiles,
-            ocr,
-            crop_variant=args.crop_variant,
-            crop_target=args.ocr_crop_target,
-        )
-        role_tiles[detection.role] = tiles
-        _write_detected_csv(output_dir / f"detected_{detection.role}_factors.csv", tiles)
+        except IndexError as exc:
+            tiles = []
+            role_errors[role] = str(exc)
+        else:
+            role = detection.role
+            tiles = recognize_factor_list_tile_names(
+                image,
+                detection.tiles,
+                ocr,
+                crop_variant=args.crop_variant,
+                crop_target=args.ocr_crop_target,
+                preprocess_crop=not args.disable_ocr_preprocess,
+                min_crop_width=args.ocr_min_crop_width,
+                min_crop_height=args.ocr_min_crop_height,
+                max_upscale=args.ocr_max_upscale,
+                sharpen_strength=args.ocr_sharpen_strength,
+                contrast_clip_limit=args.ocr_contrast_clip_limit,
+                ocr_execution_mode=args.ocr_execution_mode,
+                canvas_batch_size=args.ocr_batch_size,
+                canvas_padding=args.ocr_canvas_padding,
+            )
+        role_tiles[role] = tiles
+        _write_detected_csv(output_dir / f"detected_{role}_factors.csv", tiles)
         _write_overlay(
-            output_dir / f"{detection.role}_overlay.png",
+            output_dir / f"{role}_overlay.png",
             image,
             tiles,
             crop_target=args.ocr_crop_target,
             crop_variant=args.crop_variant,
         )
+    _write_combined_overlay(
+        output_dir / "all_roles_overlay.png",
+        image,
+        [(_role_name(index), role_tiles.get(_role_name(index), [])) for index in range(3)],
+        crop_target=args.ocr_crop_target,
+        crop_variant=args.crop_variant,
+    )
     _write_json(
         output_dir / "ocr_metadata.json",
         {
             "roles": {role: len(tiles) for role, tiles in role_tiles.items()},
+            "role_errors": role_errors,
             "ocr_engine": "paddleocr",
             "ocr_crop_target": args.ocr_crop_target,
             "crop_variant": args.crop_variant,
+            "ocr_execution_mode": args.ocr_execution_mode,
+            "ocr_batch_size": args.ocr_batch_size,
+            "ocr_canvas_padding": args.ocr_canvas_padding,
+            "ocr_preprocess": _ocr_preprocess_params(args),
             "paddle_cache_dir": str(_resolve_path(args.paddle_cache_dir)),
             "paddle_params": {
                 "text_det_limit_side_len": args.paddle_det_limit_side_len,
@@ -353,6 +510,17 @@ def _run_factor_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
             },
         },
     )
+
+
+def _ocr_preprocess_params(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "enabled": not args.disable_ocr_preprocess,
+        "min_crop_width": args.ocr_min_crop_width,
+        "min_crop_height": args.ocr_min_crop_height,
+        "max_upscale": args.ocr_max_upscale,
+        "sharpen_strength": args.ocr_sharpen_strength,
+        "contrast_clip_limit": args.ocr_contrast_clip_limit,
+    }
 
 
 def _resolve_path(path: Path) -> Path:

@@ -8,6 +8,10 @@ requests>=2.32
 winocr>=0.0.14
 rapidfuzz>=3.9
 mss>=9.0
+# PaddleOCR (CPU). PaddlePaddle wheels are not available for every Python
+# version; use a supported Python virtual environment for OCR if pip skips it.
+paddleocr>=3.5.0
+paddlepaddle>=3.0.0; python_version >= "3.9" and python_version < "3.14"
 # EasyOCR + PyTorch（CPU 版）。torch は事前に CPU ホイールを入れておく必要あり：
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 easyocr>=1.7.2

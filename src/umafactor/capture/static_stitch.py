@@ -151,13 +151,23 @@ def detect_dynamic_roi(frames: Sequence[ScrollFrame]) -> DynamicRoiResult:
         candidates.append((area_score * width_bonus, rect))
 
     projection_rect = _roi_from_projection(combined)
+    projection_is_fallback = projection_rect.as_tuple() == (0, 0, bounds.width, bounds.height)
     if (
-        projection_rect.width >= bounds.width * 0.45
+        not projection_is_fallback
+        and projection_rect.width >= bounds.width * 0.45
         and projection_rect.height >= bounds.height * 0.15
     ):
         rect = projection_rect
     elif candidates:
         rect = max(candidates, key=lambda item: item[0])[1]
+        origin_margin_x = max(2, int(round(bounds.width * 0.01)))
+        origin_margin_y = max(2, int(round(bounds.height * 0.01)))
+        if (
+            projection_is_fallback
+            and rect.x0 <= origin_margin_x
+            and rect.y0 <= origin_margin_y
+        ):
+            rect = projection_rect
     else:
         rect = projection_rect
 

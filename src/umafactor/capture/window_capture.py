@@ -6,7 +6,7 @@ import ctypes
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import cv2
 import numpy as np
@@ -204,6 +204,8 @@ def capture_window_frames(
     backend: CaptureBackend = "auto",
     region: CaptureRegion = "client",
     min_frame_diff: float = 1.5,
+    stop_requested: Callable[[], bool] | None = None,
+    progress_callback: Callable[[int, float], None] | None = None,
 ) -> tuple[ScrollFrame, ...]:
     if duration_sec <= 0:
         raise ValueError("duration_sec must be positive")
@@ -211,14 +213,20 @@ def capture_window_frames(
         raise ValueError("fps must be positive")
 
     capture_rect = window.capture_rect(region)
+    if stop_requested is not None and stop_requested():
+        return tuple()
+
     frames: list[ScrollFrame] = []
     last_kept: np.ndarray | None = None
     interval = 1.0 / fps
-    deadline = time.perf_counter() + duration_sec
-    next_at = time.perf_counter()
+    started_at = time.perf_counter()
+    deadline = started_at + duration_sec
+    next_at = started_at
     index = 0
     with ScreenCaptureSession(backend) as session:
         while time.perf_counter() < deadline:
+            if stop_requested is not None and stop_requested():
+                break
             now = time.perf_counter()
             if now < next_at:
                 time.sleep(min(next_at - now, interval))
@@ -233,6 +241,8 @@ def capture_window_frames(
                     )
                 )
                 last_kept = image
+                if progress_callback is not None:
+                    progress_callback(len(frames), time.perf_counter() - started_at)
             index += 1
             next_at += interval
     return tuple(frames)

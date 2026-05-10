@@ -31,14 +31,27 @@ from umafactor.detection.factor_list import (  # noqa: E402
     FactorListTile,
     detect_stitched_factor_list,
 )
+from umafactor.detection.star_slots import (  # noqa: E402
+    DEFAULT_STAR_SLOT_CONFIG,
+    detect_star_slots_from_card,
+)
 from umafactor.evaluation.ocr_dataset import (  # noqa: E402
     ExpectedOcrFactor,
     evaluate_ocr_factors,
     load_expected_ocr_factors,
 )
 from umafactor.recognition.factor_list_ocr import (  # noqa: E402
+    DEFAULT_OCR_CONTRAST_CLIP_LIMIT,
+    DEFAULT_OCR_MAX_UPSCALE,
+    DEFAULT_OCR_MIN_HEIGHT,
+    DEFAULT_OCR_MIN_WIDTH,
+    DEFAULT_OCR_SHARPEN_STRENGTH,
     factor_list_ocr_region_bbox,
     recognize_factor_list_tile_names,
+)
+from umafactor.recognition.paddle_ocr_adapter import (  # noqa: E402
+    DEFAULT_TEXT_DET_LIMIT_SIDE_LEN,
+    DEFAULT_TEXT_DET_LIMIT_TYPE,
 )
 
 
@@ -99,6 +112,59 @@ def main() -> int:
         help="Name crop variant used before OCR.",
     )
     parser.add_argument(
+        "--disable-ocr-preprocess",
+        action="store_true",
+        help="Disable OCR crop upscaling, contrast normalization, and sharpening.",
+    )
+    parser.add_argument(
+        "--ocr-min-crop-width",
+        type=int,
+        default=DEFAULT_OCR_MIN_WIDTH,
+        help="Minimum OCR crop width after automatic upscaling.",
+    )
+    parser.add_argument(
+        "--ocr-min-crop-height",
+        type=int,
+        default=DEFAULT_OCR_MIN_HEIGHT,
+        help="Minimum OCR crop height after automatic upscaling.",
+    )
+    parser.add_argument(
+        "--ocr-max-upscale",
+        type=float,
+        default=DEFAULT_OCR_MAX_UPSCALE,
+        help="Maximum OCR crop upscale factor.",
+    )
+    parser.add_argument(
+        "--ocr-sharpen-strength",
+        type=float,
+        default=DEFAULT_OCR_SHARPEN_STRENGTH,
+        help="Unsharp mask strength applied to OCR crops. 0 disables sharpening.",
+    )
+    parser.add_argument(
+        "--ocr-contrast-clip-limit",
+        type=float,
+        default=DEFAULT_OCR_CONTRAST_CLIP_LIMIT,
+        help="CLAHE clip limit applied to OCR crop luminance. 0 disables contrast normalization.",
+    )
+    parser.add_argument(
+        "--ocr-execution-mode",
+        choices=["sequential", "canvas", "batch"],
+        default="canvas",
+        help="OCR execution strategy. canvas packs multiple cards into one OCR image.",
+    )
+    parser.add_argument(
+        "--ocr-batch-size",
+        type=int,
+        default=0,
+        help="Number of cards per OCR canvas or Paddle batch. 0 processes one OCR image per role.",
+    )
+    parser.add_argument(
+        "--ocr-canvas-padding",
+        type=int,
+        default=24,
+        help="Padding in pixels between cards when --ocr-execution-mode=canvas.",
+    )
+    parser.add_argument(
         "--overlay-sections",
         choices=["selected", "all"],
         default="all",
@@ -124,14 +190,14 @@ def main() -> int:
     parser.add_argument(
         "--paddle-det-limit-side-len",
         type=int,
-        default=None,
-        help="PaddleOCR text_det_limit_side_len. Leave unset to use PaddleOCR defaults.",
+        default=DEFAULT_TEXT_DET_LIMIT_SIDE_LEN,
+        help="PaddleOCR text_det_limit_side_len. Default preserves the prepared OCR canvas scale.",
     )
     parser.add_argument(
         "--paddle-det-limit-type",
         choices=["min", "max"],
-        default=None,
-        help="PaddleOCR text_det_limit_type. Use min to upscale small card crops.",
+        default=DEFAULT_TEXT_DET_LIMIT_TYPE,
+        help="PaddleOCR text_det_limit_type. min avoids shrinking prepared OCR canvases.",
     )
     parser.add_argument(
         "--paddle-det-thresh",
@@ -185,6 +251,10 @@ def main() -> int:
         "ocr_engine": args.ocr_engine if not args.skip_ocr else "none",
         "ocr_crop_target": args.ocr_crop_target,
         "crop_variant": args.crop_variant,
+        "ocr_execution_mode": args.ocr_execution_mode,
+        "ocr_batch_size": args.ocr_batch_size,
+        "ocr_canvas_padding": args.ocr_canvas_padding,
+        "ocr_preprocess": _ocr_preprocess_params(args),
         "overlay_sections": args.overlay_sections,
         "paddle_mode": args.paddle_mode if args.ocr_engine == "paddleocr" else None,
         "paddle_lang": args.paddle_lang if args.ocr_engine == "paddleocr" else None,
@@ -278,6 +348,15 @@ def _recognize_tiles_if_needed(
         ocr,
         crop_variant=args.crop_variant,
         crop_target=args.ocr_crop_target,
+        preprocess_crop=not args.disable_ocr_preprocess,
+        min_crop_width=args.ocr_min_crop_width,
+        min_crop_height=args.ocr_min_crop_height,
+        max_upscale=args.ocr_max_upscale,
+        sharpen_strength=args.ocr_sharpen_strength,
+        contrast_clip_limit=args.ocr_contrast_clip_limit,
+        ocr_execution_mode=args.ocr_execution_mode,
+        canvas_batch_size=args.ocr_batch_size,
+        canvas_padding=args.ocr_canvas_padding,
     )
 
 
@@ -297,9 +376,11 @@ def _write_section_overlays(
         for section_index in range(3):
             if section_index == selected_section_index:
                 continue
+            role = _role_name(section_index)
             try:
                 detection = detect_stitched_factor_list(image, section_index=section_index)
             except IndexError:
+                section_tiles[section_index] = (role, [])
                 continue
             tiles = _recognize_tiles_if_needed(image, detection.tiles, ocr, args)
             section_tiles[section_index] = (detection.role, tiles)
@@ -312,6 +393,13 @@ def _write_section_overlays(
             crop_target=args.ocr_crop_target,
             crop_variant=args.crop_variant,
         )
+    _write_combined_overlay(
+        output_dir / "all_roles_overlay.png",
+        image,
+        [section_tiles.get(index, (_role_name(index), [])) for index in range(3)],
+        crop_target=args.ocr_crop_target,
+        crop_variant=args.crop_variant,
+    )
 
 
 def _role_name(section_index: int) -> str:
@@ -402,6 +490,10 @@ def _write_summary(path: Path, report: dict[str, object]) -> None:
         f"- ocr_engine: `{report['ocr_engine']}`",
         f"- ocr_crop_target: `{report['ocr_crop_target']}`",
         f"- crop_variant: `{report['crop_variant']}`",
+        f"- ocr_execution_mode: `{report['ocr_execution_mode']}`",
+        f"- ocr_batch_size: `{report['ocr_batch_size']}`",
+        f"- ocr_canvas_padding: `{report['ocr_canvas_padding']}`",
+        f"- ocr_preprocess: `{report['ocr_preprocess']}`",
         f"- overlay_sections: `{report['overlay_sections']}`",
     ]
     if report.get("paddle_mode"):
@@ -449,6 +541,25 @@ def _write_overlay(
     crop_target: str,
     crop_variant: str,
 ) -> None:
+    cv2.imwrite(
+        str(path),
+        _make_overlay(
+            image,
+            tiles,
+            crop_target=crop_target,
+            crop_variant=crop_variant,
+        ),
+    )
+
+
+def _make_overlay(
+    image,
+    tiles: Sequence[FactorListTile],
+    *,
+    crop_target: str,
+    crop_variant: str,
+    include_role: bool = False,
+):
     panel_width = _overlay_panel_width(image.shape[1])
     overlay = cv2.copyMakeBorder(
         image,
@@ -474,6 +585,7 @@ def _write_overlay(
         cv2.LINE_AA,
     )
     for tile in tiles:
+        _draw_star_debug_overlay(overlay, image.shape[1], tile)
         x0, y0, x1, y1 = factor_list_ocr_region_bbox(
             image,
             tile,
@@ -484,7 +596,7 @@ def _write_overlay(
         cv2.rectangle(overlay, (x0, y0), (x1, y1), color, 2)
         cv2.putText(
             overlay,
-            f"#{tile.order} s{tile.star}",
+            _overlay_box_label(tile, include_role=include_role),
             (x0, max(12, y0 - 4)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
@@ -499,8 +611,87 @@ def _write_overlay(
         colors,
         crop_target=crop_target,
         crop_variant=crop_variant,
+        include_role=include_role,
     )
-    cv2.imwrite(str(path), overlay)
+    return overlay
+
+
+def _write_combined_overlay(
+    path: Path,
+    image,
+    role_tiles: Sequence[tuple[str, Sequence[FactorListTile]]],
+    *,
+    crop_target: str,
+    crop_variant: str,
+) -> None:
+    all_tiles: list[FactorListTile] = []
+    for _role, tiles in role_tiles:
+        all_tiles.extend(tiles)
+    cv2.imwrite(
+        str(path),
+        _make_overlay(
+            image,
+            all_tiles,
+            crop_target=crop_target,
+            crop_variant=crop_variant,
+            include_role=True,
+        ),
+    )
+
+
+def _draw_star_debug_overlay(overlay, image_width: int, tile: FactorListTile) -> None:
+    debug = detect_star_slots_from_card(overlay[:, :image_width], tile.bbox)
+    card_color = (255, 255, 0)
+    icon_color = (0, 165, 255)
+    roi_color = (255, 0, 255)
+    slot_filled_color = (0, 220, 255)
+    slot_empty_color = (160, 160, 160)
+
+    _draw_rect(overlay, debug.card_bbox, card_color, 1)
+    _draw_rect(overlay, debug.icon_exclusion_bbox, icon_color, 1)
+    _draw_rect(overlay, debug.star_roi_bbox, roi_color, 1)
+    for index, (slot_bbox, ratio) in enumerate(zip(debug.slot_bboxes, debug.yellow_ratios)):
+        color = (
+            slot_filled_color
+            if ratio > DEFAULT_STAR_SLOT_CONFIG.yellow_ratio_threshold
+            else slot_empty_color
+        )
+        _draw_rect(overlay, slot_bbox, color, 1)
+        x0, y0, _x1, _y1 = slot_bbox
+        cv2.putText(
+            overlay,
+            f"{ratio:.2f}",
+            (x0, max(10, y0 - 2 + index % 2)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.30,
+            color,
+            1,
+            cv2.LINE_AA,
+        )
+
+    x0, y0, _x1, _y1 = debug.card_bbox
+    cv2.putText(
+        overlay,
+        f"star={debug.star_count}",
+        (x0, max(12, y0 - 16)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.38,
+        roi_color,
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_rect(
+    image,
+    bbox: tuple[int, int, int, int],
+    color: tuple[int, int, int],
+    thickness: int,
+) -> None:
+    x0, y0, x1, y1 = bbox
+    if x1 <= x0 or y1 <= y0:
+        return
+    cv2.rectangle(image, (x0, y0), (x1, y1), color, thickness)
 
 
 def _overlay_panel_width(image_width: int) -> int:
@@ -515,6 +706,7 @@ def _draw_overlay_text_panel(
     *,
     crop_target: str,
     crop_variant: str,
+    include_role: bool = False,
 ):
     if Image is None or ImageDraw is None or ImageFont is None:
         return _draw_overlay_text_panel_cv2(
@@ -524,6 +716,7 @@ def _draw_overlay_text_panel(
             colors,
             crop_target=crop_target,
             crop_variant=crop_variant,
+            include_role=include_role,
         )
 
     rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
@@ -540,17 +733,26 @@ def _draw_overlay_text_panel(
         crop_target=crop_target,
         crop_variant=crop_variant,
     )
-    for tile in tiles:
+    for index, tile in enumerate(tiles):
         _x0, y0, x1, _y1 = factor_list_ocr_region_bbox(
             overlay[:, :image_width],
             tile,
             target=crop_target,
             variant=crop_variant,
         )
-        label_y = label_positions.get(tile.order, max(2, min(overlay.shape[0] - line_height - 2, y0)))
+        label_y = (
+            label_positions[index]
+            if index < len(label_positions)
+            else max(2, min(overlay.shape[0] - line_height - 2, y0))
+        )
         color = colors.get(tile.color, (255, 255, 255))
         rgb_color = (color[2], color[1], color[0], 255)
-        text = _trim_text_to_width(draw, _overlay_label(tile), font, max_width - 16)
+        text = _trim_text_to_width(
+            draw,
+            _overlay_label(tile, include_role=include_role),
+            font,
+            max_width - 16,
+        )
         draw.rectangle(
             (text_x - 6, label_y - 1, overlay.shape[1] - 6, label_y + line_height - 1),
             fill=(255, 255, 255, 190),
@@ -576,6 +778,7 @@ def _draw_overlay_text_panel_cv2(
     *,
     crop_target: str,
     crop_variant: str,
+    include_role: bool = False,
 ):
     label_positions = _overlay_label_positions(
         overlay[:, :image_width],
@@ -584,18 +787,20 @@ def _draw_overlay_text_panel_cv2(
         crop_target=crop_target,
         crop_variant=crop_variant,
     )
-    for tile in tiles:
+    for index, tile in enumerate(tiles):
         _x0, y0, _x1, _y1 = factor_list_ocr_region_bbox(
             overlay[:, :image_width],
             tile,
             target=crop_target,
             variant=crop_variant,
         )
-        label_y = label_positions.get(tile.order, y0)
+        label_y = label_positions[index] if index < len(label_positions) else y0
         color = colors.get(tile.color, (80, 80, 80))
         cv2.putText(
             overlay,
-            _overlay_label(tile).encode("ascii", errors="replace").decode("ascii"),
+            _overlay_label(tile, include_role=include_role)
+            .encode("ascii", errors="replace")
+            .decode("ascii"),
             (image_width + 12, max(16, label_y + 14)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
@@ -613,27 +818,27 @@ def _overlay_label_positions(
     *,
     crop_target: str,
     crop_variant: str,
-) -> dict[int, int]:
+) -> list[int]:
     max_y = max(2, image.shape[0] - line_height - 2)
     entries: list[tuple[int, int, FactorListTile]] = []
-    for tile in tiles:
+    for index, tile in enumerate(tiles):
         _x0, y0, _x1, _y1 = factor_list_ocr_region_bbox(
             image,
             tile,
             target=crop_target,
             variant=crop_variant,
         )
-        entries.append((y0, tile.order, tile))
+        entries.append((y0, index, tile))
 
-    positions: dict[int, int] = {}
+    positions = [2 for _tile in tiles]
     next_y = 2
-    for y0, _order, tile in sorted(entries):
+    for y0, index, _tile in sorted(entries):
         label_y = max(2, min(max_y, y0))
         if label_y < next_y:
             label_y = next_y
         if label_y > max_y:
             label_y = max_y
-        positions[tile.order] = label_y
+        positions[index] = label_y
         next_y = label_y + line_height + 2
     return positions
 
@@ -650,9 +855,21 @@ def _load_overlay_font(size: int):
     return ImageFont.load_default()
 
 
-def _overlay_label(tile: FactorListTile) -> str:
+def _overlay_box_label(tile: FactorListTile, *, include_role: bool = False) -> str:
+    if not include_role:
+        return f"#{tile.order} s{tile.star}"
+    return f"{_role_short(tile.role)}#{tile.order} s{tile.star}"
+
+
+def _overlay_label(tile: FactorListTile, *, include_role: bool = False) -> str:
     raw_name = tile.raw_name.strip() if tile.raw_name else "(blank)"
+    if include_role:
+        return f"{tile.role} #{tile.order} star={tile.star} {raw_name}"
     return f"#{tile.order} star={tile.star} {raw_name}"
+
+
+def _role_short(role: str) -> str:
+    return {"parent": "P", "ancestor1": "A1", "ancestor2": "A2"}.get(role, role)
 
 
 def _trim_text_to_width(draw, text: str, font, max_width: int) -> str:
@@ -696,6 +913,17 @@ def _name_similarity(actual: str, expected: str) -> float:
     if not actual and not expected:
         return 1.0
     return SequenceMatcher(None, actual, expected).ratio()
+
+
+def _ocr_preprocess_params(args: argparse.Namespace) -> dict[str, object]:
+    return {
+        "enabled": not args.disable_ocr_preprocess,
+        "min_crop_width": args.ocr_min_crop_width,
+        "min_crop_height": args.ocr_min_crop_height,
+        "max_upscale": args.ocr_max_upscale,
+        "sharpen_strength": args.ocr_sharpen_strength,
+        "contrast_clip_limit": args.ocr_contrast_clip_limit,
+    }
 
 
 if __name__ == "__main__":

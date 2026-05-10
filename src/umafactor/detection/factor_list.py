@@ -22,6 +22,7 @@ from .stars import (
     _detect_golden_stars,
     _estimate_tile_right_edges,
 )
+from .star_slots import detect_star_slots_from_card
 from .types import FactorColor, normalize_width
 
 FactorListRole = Literal["parent", "ancestor1", "ancestor2"]
@@ -92,9 +93,7 @@ def detect_stitched_factor_list(
     if x_left1 is None or x_right1 is None:
         raise RuntimeError("failed to estimate factor tile columns")
 
-    section = sections[section_index]
-    y_min = max(0, section.factor_y_start - PARENT_ROW0_LOOKBACK - 30)
-    y_max = min(norm.shape[0], section.factor_y_end + TILE_HEIGHT + 30)
+    y_min, y_max = _section_row_bounds(sections, section_index, norm.shape[0])
     left_rows: list[_ColumnRowCandidate] = []
     right_rows: list[_ColumnRowCandidate] = []
     for y_center, left_gold, right_gold, _left_empty, _right_empty in rows:
@@ -108,7 +107,6 @@ def detect_stitched_factor_list(
                     col_index=0,
                     y_center=y_center,
                     x_right=x_left1,
-                    gold_count=len(left_gold),
                 )
             )
         if right_gold:
@@ -119,7 +117,6 @@ def detect_stitched_factor_list(
                     col_index=1,
                     y_center=y_center,
                     x_right=x_right1,
-                    gold_count=len(right_gold),
                 )
             )
 
@@ -157,6 +154,16 @@ def detect_stitched_factor_list(
     )
 
 
+def _section_row_bounds(sections, section_index: int, image_height: int) -> tuple[int, int]:
+    section = sections[section_index]
+    y_min = max(0, section.factor_y_start - PARENT_ROW0_LOOKBACK - 30)
+    y_max = min(image_height, section.factor_y_end + TILE_HEIGHT + 30)
+    if section_index + 1 < len(sections):
+        next_y_min = max(0, sections[section_index + 1].factor_y_start - PARENT_ROW0_LOOKBACK - 30)
+        y_max = min(y_max, max(y_min, next_y_min - 1))
+    return y_min, y_max
+
+
 def _build_column_candidate(
     norm_img: np.ndarray,
     *,
@@ -164,7 +171,6 @@ def _build_column_candidate(
     col_index: int,
     y_center: int,
     x_right: int,
-    gold_count: int,
 ) -> _ColumnRowCandidate:
     x0 = max(0, x_right - TILE_WIDTH)
     x1 = min(norm_img.shape[1], x_right)
@@ -173,11 +179,12 @@ def _build_column_candidate(
     bbox_norm = (x0, y0, x1, y1)
     tile = norm_img[y0:y1, x0:x1]
     color = detect_factor_color(tile) if tile.size else "white"
+    star_debug = detect_star_slots_from_card(norm_img, bbox_norm)
     return _ColumnRowCandidate(
         row_index=row_index,
         col_index=col_index,
         y_center=y_center,
-        star=min(3, max(0, gold_count)),
+        star=star_debug.star_count,
         bbox_norm=bbox_norm,
         color=color,
     )
