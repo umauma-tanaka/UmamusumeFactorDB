@@ -8,6 +8,7 @@ requests>=2.32
 winocr>=0.0.14
 rapidfuzz>=3.9
 mss>=9.0
+rapidocr>=3.8.1
 # PaddleOCR (CPU). PaddlePaddle wheels are not available for every Python
 # version; use a supported Python virtual environment for OCR if pip skips it.
 paddleocr>=3.5.0

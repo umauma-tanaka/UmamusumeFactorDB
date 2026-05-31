@@ -32,6 +32,7 @@ def _get_reader():
     if _READER is None:
         import os
 
+        _ensure_easyocr_bidi_compat()
         import easyocr
 
         # Cloud Run 等で事前 DL したモデル置き場を尊重。
@@ -52,6 +53,24 @@ def _get_reader():
         # 緑因子（固有スキル）には英字混じりが多いため en も併用
         _READER = easyocr.Reader(["ja", "en"], **kwargs)
     return _READER
+
+
+def _ensure_easyocr_bidi_compat() -> None:
+    """Expose python-bidi's get_display where EasyOCR 1.7 imports it.
+
+    Some python-bidi releases keep get_display under bidi.algorithm without
+    re-exporting it from bidi.__init__. EasyOCR imports ``from bidi import
+    get_display``, so provide the re-export locally instead of patching
+    site-packages.
+    """
+
+    import bidi
+
+    if hasattr(bidi, "get_display"):
+        return
+    from bidi.algorithm import get_display
+
+    bidi.get_display = get_display  # type: ignore[attr-defined]
 
 
 def _preprocess_for_ocr(bgr: np.ndarray, upscale: int = 3) -> np.ndarray:

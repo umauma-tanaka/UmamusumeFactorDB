@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -86,6 +87,45 @@ def load_unique_skill_to_character() -> dict[str, str]:
         return {}
     with path.open(encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_skill_master_names(path: Path | None = None) -> list[str]:
+    """Load OCR skill-name candidates from the generated skill master.
+
+    The generated kouryaku.tools master is an OCR/fuzzy-match aid.  Keep this
+    reader tolerant so legacy flows continue to run when the optional file is
+    absent.
+    """
+
+    master_path = path or MODELS_DIR / "skill_master_kouryaku_tools.json"
+    if not master_path.exists():
+        return []
+
+    with master_path.open(encoding="utf-8") as f:
+        document = json.load(f)
+
+    skills = document.get("skills") if isinstance(document, dict) else document
+    if not isinstance(skills, list):
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for skill in skills:
+        name = _skill_master_name(skill)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _skill_master_name(skill: Any) -> str:
+    if not isinstance(skill, dict):
+        return ""
+    value = skill.get("name")
+    if value is None:
+        value = skill.get("skillName")
+    return str(value).strip() if value is not None else ""
 
 
 def green_factor_names() -> list[str]:

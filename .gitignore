@@ -39,6 +39,7 @@ models/easyocr/
 models/easyocr_user_network/
 outputs/
 paddleocr_cache/
+rapidocr_models/
 # テンプレマッチ用の正解 crop（datasets/red_blue_templates, star_templates,
 # green_name_templates）はパッケージの一部として commit する
 

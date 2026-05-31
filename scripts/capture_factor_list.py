@@ -22,14 +22,7 @@ import cv2
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "scripts"))
 
-from evaluate_factor_ocr import (  # noqa: E402
-    _role_name,
-    _write_combined_overlay,
-    _write_detected_csv,
-    _write_overlay,
-)
 from umafactor.capture.static_stitch import (  # noqa: E402
     detect_dynamic_roi,
     stitch_static_scroll_frames,
@@ -41,23 +34,19 @@ from umafactor.capture.window_capture import (  # noqa: E402
     list_windows,
     rank_window_candidates,
 )
-from umafactor.detection.factor_list import (  # noqa: E402
-    FactorListTile,
-    detect_stitched_factor_list,
-)
-from umafactor.recognition.factor_list_ocr import (  # noqa: E402
+from umafactor.recognition.ocr_protocol import (  # noqa: E402
     DEFAULT_OCR_CONTRAST_CLIP_LIMIT,
     DEFAULT_OCR_MAX_UPSCALE,
     DEFAULT_OCR_MIN_HEIGHT,
     DEFAULT_OCR_MIN_WIDTH,
     DEFAULT_OCR_SHARPEN_STRENGTH,
-    recognize_factor_list_tile_names,
 )
 
 
-DEFAULT_TITLE_KEYWORDS = ("umamusume", "ウマ娘")
+DEFAULT_TITLE_KEYWORDS = ("umamusume", "\u30a6\u30de\u5a18")
 DEFAULT_PROCESS_NAME_KEYWORDS = ("UmamusumePrettyDerby_Jpn",)
 DEFAULT_CACHE_DIR = ROOT / "paddleocr_cache"
+DEFAULT_RAPIDOCR_MODEL_DIR = ROOT / "rapidocr_models"
 
 
 def main() -> int:
@@ -267,15 +256,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only capture and stitch. Do not run factor-list OCR.",
     )
     parser.add_argument(
+        "--submitter-id",
+        default="live-capture",
+        help="Submitter id written to factor_list_submission.json.",
+    )
+    parser.add_argument(
+        "--ocr-engine",
+        choices=["paddle", "rapidocr"],
+        default="rapidocr",
+        help="OCR engine used for factor-list recognition.",
+    )
+    parser.add_argument(
         "--ocr-crop-target",
         choices=["name", "card"],
-        default="card",
+        default="name",
         help="Image region passed to OCR for each detected factor tile.",
     )
     parser.add_argument(
         "--crop-variant",
-        choices=["current", "wide", "upper", "full"],
-        default="current",
+        choices=["body_name", "current", "wide", "upper", "full"],
+        default="body_name",
         help="Name crop variant used when --ocr-crop-target=name.",
     )
     parser.add_argument(
@@ -315,15 +315,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ocr-execution-mode",
-        choices=["sequential", "canvas", "batch"],
-        default="canvas",
-        help="OCR execution strategy. canvas packs multiple cards into one PaddleOCR image.",
+        choices=["sequential", "canvas", "batch", "role_sheet"],
+        default="batch",
+        help="OCR execution strategy. batch packs prepared card crops into OCR batches.",
     )
     parser.add_argument(
         "--ocr-batch-size",
         type=int,
-        default=0,
-        help="Number of cards per OCR canvas or Paddle batch. 0 processes one OCR image per role.",
+        default=12,
+        help="Number of cards per OCR batch or canvas.",
     )
     parser.add_argument(
         "--ocr-canvas-padding",
@@ -354,6 +354,23 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--paddle-det-box-thresh", type=float, default=None)
     parser.add_argument("--paddle-det-unclip-ratio", type=float, default=None)
     parser.add_argument("--paddle-rec-score-thresh", type=float, default=None)
+    parser.add_argument(
+        "--rapidocr-model-root-dir",
+        type=Path,
+        default=DEFAULT_RAPIDOCR_MODEL_DIR,
+        help="Project-local RapidOCR model directory.",
+    )
+    parser.add_argument("--rapidocr-text-score", type=float, default=None)
+    parser.add_argument("--rapidocr-ocr-version", choices=["PP-OCRv4", "PP-OCRv5"], default="PP-OCRv4")
+    parser.add_argument("--rapidocr-lang-type", choices=["japan", "ch"], default="japan")
+    parser.add_argument("--rapidocr-model-type", choices=["mobile", "server"], default="mobile")
+    parser.add_argument(
+        "--rapidocr-rec-img-width",
+        type=int,
+        choices=[320, 480, 640],
+        default=480,
+        help="RapidOCR recognition image width; height is fixed at 48.",
+    )
     return parser
 
 
@@ -431,76 +448,89 @@ def _write_capture_debug(output_dir: Path, frames: Sequence[Any], *, roi_limit: 
 
 
 def _run_factor_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
-    from umafactor.recognition.paddle_ocr_adapter import PaddleFactorOCR
+    _run_factor_list_pipeline_ocr(image, output_dir, args)
 
-    ocr = PaddleFactorOCR(
-        lang=args.paddle_lang,
-        mode="ocr",
-        cache_dir=_resolve_path(args.paddle_cache_dir),
-        text_det_limit_side_len=args.paddle_det_limit_side_len,
-        text_det_limit_type=args.paddle_det_limit_type,
-        text_det_thresh=args.paddle_det_thresh,
-        text_det_box_thresh=args.paddle_det_box_thresh,
-        text_det_unclip_ratio=args.paddle_det_unclip_ratio,
-        text_rec_score_thresh=args.paddle_rec_score_thresh,
-    )
-    role_tiles: dict[str, Sequence[FactorListTile]] = {}
-    role_errors: dict[str, str] = {}
-    for section_index in range(3):
-        role = _role_name(section_index)
-        try:
-            detection = detect_stitched_factor_list(image, section_index=section_index)
-        except IndexError as exc:
-            tiles = []
-            role_errors[role] = str(exc)
-        else:
-            role = detection.role
-            tiles = recognize_factor_list_tile_names(
-                image,
-                detection.tiles,
-                ocr,
-                crop_variant=args.crop_variant,
-                crop_target=args.ocr_crop_target,
-                preprocess_crop=not args.disable_ocr_preprocess,
-                min_crop_width=args.ocr_min_crop_width,
-                min_crop_height=args.ocr_min_crop_height,
-                max_upscale=args.ocr_max_upscale,
-                sharpen_strength=args.ocr_sharpen_strength,
-                contrast_clip_limit=args.ocr_contrast_clip_limit,
-                ocr_execution_mode=args.ocr_execution_mode,
-                canvas_batch_size=args.ocr_batch_size,
-                canvas_padding=args.ocr_canvas_padding,
-            )
-        role_tiles[role] = tiles
-        _write_detected_csv(output_dir / f"detected_{role}_factors.csv", tiles)
-        _write_overlay(
-            output_dir / f"{role}_overlay.png",
-            image,
-            tiles,
-            crop_target=args.ocr_crop_target,
-            crop_variant=args.crop_variant,
-        )
-    _write_combined_overlay(
-        output_dir / "all_roles_overlay.png",
+
+def _run_factor_list_pipeline_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
+    from umafactor.factor_list import FactorOcrOptions, recognize_factor_list_image, to_submission
+
+    debug_dir = output_dir / "factor_list_debug"
+    batch_size = args.ocr_batch_size if args.ocr_batch_size > 0 else 12
+    rapidocr = args.ocr_engine == "rapidocr"
+    result = recognize_factor_list_image(
         image,
-        [(_role_name(index), role_tiles.get(_role_name(index), [])) for index in range(3)],
-        crop_target=args.ocr_crop_target,
-        crop_variant=args.crop_variant,
+        options=FactorOcrOptions(
+            use_paddle=True,
+            debug_dir=debug_dir,
+            enable_overlay=True,
+            enable_stitch=False,
+            ocr_mode=args.ocr_engine,
+            paddle_cache_dir=_resolve_path(args.paddle_cache_dir),
+            paddle_lang=args.paddle_lang,
+            paddle_mode="recognition",
+            paddle_det_limit_side_len=args.paddle_det_limit_side_len,
+            paddle_det_limit_type=args.paddle_det_limit_type,
+            paddle_det_thresh=args.paddle_det_thresh,
+            paddle_det_box_thresh=args.paddle_det_box_thresh,
+            paddle_det_unclip_ratio=args.paddle_det_unclip_ratio,
+            paddle_rec_score_thresh=args.paddle_rec_score_thresh,
+            rapidocr_model_root_dir=_resolve_path(args.rapidocr_model_root_dir),
+            rapidocr_text_score=args.rapidocr_text_score,
+            preprocess_crop=not args.disable_ocr_preprocess,
+            rapidocr_ocr_version=args.rapidocr_ocr_version,
+            rapidocr_lang_type=args.rapidocr_lang_type,
+            rapidocr_model_type=args.rapidocr_model_type,
+            rapidocr_rec_img_shape=(3, 48, args.rapidocr_rec_img_width),
+            rapidocr_rec_batch_num=batch_size,
+            ocr_crop_target=args.ocr_crop_target,
+            crop_variant=args.crop_variant,
+            ocr_roi_profiles=("body_name",)
+            if rapidocr
+            else (
+                "card_upper_band",
+                "text_band_with_margin",
+                "tight_text_roi",
+            ),
+            ocr_preprocess_modes=("raw_upscaled", "gray_sharpen", "color_text_safe")
+            if rapidocr
+            else (
+                "raw_upscaled",
+                "gray_sharpen",
+                "color_text_safe",
+            ),
+            ocr_min_crop_width=args.ocr_min_crop_width,
+            ocr_min_crop_height=args.ocr_min_crop_height,
+            ocr_max_upscale=args.ocr_max_upscale,
+            ocr_sharpen_strength=args.ocr_sharpen_strength,
+            ocr_contrast_clip_limit=args.ocr_contrast_clip_limit,
+            ocr_execution_mode=args.ocr_execution_mode,
+            ocr_batch_size=batch_size,
+            ocr_canvas_padding=args.ocr_canvas_padding,
+        ),
     )
+    submission = to_submission(
+        result,
+        submitter_id=args.submitter_id,
+        image_path=output_dir / "stitched.png",
+    )
+    _write_json(output_dir / "factor_list_submission.json", submission.to_json_dict())
     _write_json(
-        output_dir / "ocr_metadata.json",
+        output_dir / "factor_list_ocr_metadata.json",
         {
-            "roles": {role: len(tiles) for role, tiles in role_tiles.items()},
-            "role_errors": role_errors,
-            "ocr_engine": "paddleocr",
-            "ocr_crop_target": args.ocr_crop_target,
-            "crop_variant": args.crop_variant,
+            "pipeline": "factor-list",
+            "factor_count": len(result.factors),
+            "needs_review": sum(1 for factor in result.factors if factor.needs_review),
+            "debug_dir": str(debug_dir),
+            "submission_path": str(output_dir / "factor_list_submission.json"),
+            "ocr_engine": args.ocr_engine,
+            "card_detector": "card-body",
             "ocr_execution_mode": args.ocr_execution_mode,
-            "ocr_batch_size": args.ocr_batch_size,
+            "ocr_batch_size": batch_size,
             "ocr_canvas_padding": args.ocr_canvas_padding,
             "ocr_preprocess": _ocr_preprocess_params(args),
             "paddle_cache_dir": str(_resolve_path(args.paddle_cache_dir)),
             "paddle_params": {
+                "mode": "recognition",
                 "text_det_limit_side_len": args.paddle_det_limit_side_len,
                 "text_det_limit_type": args.paddle_det_limit_type,
                 "text_det_thresh": args.paddle_det_thresh,
@@ -508,6 +538,12 @@ def _run_factor_ocr(image, output_dir: Path, args: argparse.Namespace) -> None:
                 "text_det_unclip_ratio": args.paddle_det_unclip_ratio,
                 "text_rec_score_thresh": args.paddle_rec_score_thresh,
             },
+            "rapidocr_model_root_dir": str(_resolve_path(args.rapidocr_model_root_dir)),
+            "rapidocr_text_score": args.rapidocr_text_score,
+            "rapidocr_ocr_version": args.rapidocr_ocr_version,
+            "rapidocr_lang_type": args.rapidocr_lang_type,
+            "rapidocr_model_type": args.rapidocr_model_type,
+            "rapidocr_rec_img_shape": [3, 48, args.rapidocr_rec_img_width],
         },
     )
 
